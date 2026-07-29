@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   buildAmbientMessages,
   buildAnswerMessages,
+  buildSummaryMessages,
+  compactSummaryOutput,
   isAmbientSkip,
 } from "../src/ai/prompts.ts";
 import type { StoredMessage } from "../src/types.ts";
@@ -99,5 +101,33 @@ describe("capability grounding", () => {
     expect(system).toContain("bypass Discord permissions");
     expect(system).toContain("never excuse cheating");
     expect(system).toContain("avoid whataboutism");
+  });
+});
+
+describe("summary compaction", () => {
+  test("bounds summary input and persisted output", () => {
+    const recent = Array.from({ length: 20 }, (_, index) =>
+      stored(index + 1, `user-${index + 1}`, "x".repeat(2_000)),
+    );
+    const summaryMessages = buildSummaryMessages("p".repeat(16_000), recent);
+    const system = summaryMessages[0]?.content;
+    const payloadText = summaryMessages[1]?.content;
+    expect(typeof system).toBe("string");
+    expect(typeof payloadText).toBe("string");
+    expect(system).toContain("Hard limit: 600 words and 6000 characters");
+
+    const payload = JSON.parse(payloadText as string) as {
+      previousSummary: string;
+      transcript: Array<{ id: number; content: string }>;
+    };
+    expect(payload.previousSummary.length).toBeLessThanOrEqual(12_100);
+    expect(payload.transcript.at(-1)?.id).toBe(20);
+    expect(
+      payload.transcript.reduce((total, message) => total + message.content.length, 0),
+    ).toBeLessThanOrEqual(24_000);
+
+    const compact = compactSummaryOutput("word ".repeat(2_000));
+    expect(compact.split(" ")).toHaveLength(900);
+    expect(compact.length).toBeLessThanOrEqual(6_000);
   });
 });

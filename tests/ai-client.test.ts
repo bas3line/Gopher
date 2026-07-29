@@ -81,6 +81,36 @@ describe("OpenAI-compatible client", () => {
     ).rejects.toThrow("exhausted its answer budget");
   });
 
+  test("can retain usable text from a configured truncated background response", async () => {
+    const endpoint = startServer(async (request) => {
+      const body = (await request.json()) as Record<string, unknown>;
+      expect(body.temperature).toBe(0.2);
+      return Response.json({
+        choices: [
+          {
+            finish_reason: "length",
+            message: { content: "compact summary that remains useful" },
+          },
+        ],
+      });
+    });
+    const client = new AIClient({
+      endpoint,
+      apiKey: "local-test-key",
+      maxTokens: 16_384,
+      temperature: 0.2,
+      acceptTruncatedOutput: true,
+      logger: pino({ level: "silent" }),
+      maxRetries: 0,
+    });
+    await expect(
+      client.complete([{ role: "user", content: "summarize" }], "fun-model"),
+    ).resolves.toEqual({
+      content: "compact summary that remains useful",
+      truncated: true,
+    });
+  });
+
   test("marks authentication failures as non-retryable", async () => {
     const endpoint = startServer(() => new Response(null, { status: 401 }));
     const client = new AIClient({

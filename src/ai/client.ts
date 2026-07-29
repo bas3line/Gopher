@@ -22,6 +22,7 @@ export interface CompletionResult {
   content: string;
   promptTokens?: number;
   completionTokens?: number;
+  truncated?: boolean;
 }
 
 export interface CompletionClient {
@@ -79,6 +80,8 @@ export class AIClient implements CompletionClient {
       maxTokens: number;
       logger: Logger;
       reasoningEffort?: ReasoningEffort;
+      temperature?: number;
+      acceptTruncatedOutput?: boolean;
       timeoutMs?: number;
       maxRetries?: number;
     },
@@ -122,7 +125,7 @@ export class AIClient implements CompletionClient {
           model,
           messages,
           max_tokens: this.options.maxTokens,
-          temperature: 0.78,
+          temperature: this.options.temperature ?? 0.78,
           stream: false,
           ...(this.options.reasoningEffort
             ? { reasoning_effort: this.options.reasoningEffort }
@@ -183,7 +186,8 @@ export class AIClient implements CompletionClient {
     }
 
     const message = parsed.data.choices[0]?.message;
-    if (parsed.data.choices[0]?.finish_reason === "length") {
+    const wasTruncated = parsed.data.choices[0]?.finish_reason === "length";
+    if (wasTruncated && !this.options.acceptTruncatedOutput) {
       throw new AIProviderError(
         "AI provider exhausted its answer budget before completing the response",
         false,
@@ -208,6 +212,7 @@ export class AIClient implements CompletionClient {
       ...(parsed.data.usage?.completion_tokens !== undefined
         ? { completionTokens: parsed.data.usage.completion_tokens }
         : {}),
+      ...(wasTruncated ? { truncated: true } : {}),
     };
   }
 }

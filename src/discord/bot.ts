@@ -16,6 +16,7 @@ import { AIProviderError, type CompletionClient } from "../ai/client.ts";
 import {
   buildAmbientMessages,
   buildAnswerMessages,
+  compactSummaryOutput,
   buildSummaryMessages,
   isAmbientSkip,
 } from "../ai/prompts.ts";
@@ -834,10 +835,24 @@ export class DiscordBot {
       );
       const lastMessage = messages.at(-1);
       if (!lastMessage) return;
+      const summary = compactSummaryOutput(completion.content);
+      if (!summary) {
+        throw new AIProviderError("AI provider returned an empty summary", false);
+      }
+      if (completion.truncated) {
+        this.dependencies.logger.warn(
+          {
+            guildId,
+            channelId,
+            completionTokens: completion.completionTokens,
+          },
+          "summary provider reached its output limit; saved a compact prefix",
+        );
+      }
       await this.dependencies.memory.saveSummary(
         guildId,
         channelId,
-        completion.content,
+        summary,
         lastMessage.id,
       );
       await this.dependencies.memory.recordAIEvent({

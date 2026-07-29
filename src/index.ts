@@ -40,6 +40,8 @@ const summaryAI = new AIClient({
   apiKey: config.text.apiKey,
   maxTokens: config.text.summaryMaxTokens,
   reasoningEffort: config.text.reasoningEffort,
+  temperature: 0.2,
+  acceptTruncatedOutput: true,
   logger,
 });
 const visionAI = new AIClient({
