@@ -65,6 +65,12 @@ describe("capability grounding", () => {
           imageUrl: "https://cdn.example/tuff.png",
         },
       ],
+      runtimeCapabilities: {
+        nativeVoiceEnabled: true,
+        liveVoiceChatEnabled: true,
+        liveVoiceChatActive: false,
+        musicEnabled: true,
+      },
     });
     const system = messages
       .filter((message) => message.role === "system")
@@ -74,6 +80,13 @@ describe("capability grounding", () => {
     expect(system).toContain("You are not text-only");
     expect(system).toContain("add emoji reactions");
     expect(system).toContain("Fish Audio is primary");
+    expect(system).toContain("@Gopher play <song>");
+    expect(system).toContain("/voicechat join");
+    expect(system).toContain("Persistent channel text memory");
+    expect(system).toContain("Lavalink music actions: enabled");
+    expect(system).toContain("SERVER PRESENCE");
+    expect(system).toContain("actual regular in this server");
+    expect(system).toContain("not a sentient creature");
     expect(system).toContain("<:tuff:1531809280062259260>");
     expect(system).toContain("Never invent or modify an emoji ID");
     expect(system).not.toContain("short natural hindi");

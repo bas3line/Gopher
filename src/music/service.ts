@@ -30,6 +30,13 @@ interface MusicServiceDependencies {
   logger: Logger;
 }
 
+export interface TextMusicPlayRequest {
+  guild: Guild;
+  userId: string;
+  username: string;
+  query: string;
+}
+
 export class MusicService {
   private readonly shoukaku?: Shoukaku;
   private readonly boundPlayers = new Set<string>();
@@ -171,6 +178,34 @@ export class MusicService {
     }
   }
 
+  /** Executes an explicit @Gopher play request without faking a slash interaction. */
+  async playFromText(request: TextMusicPlayRequest): Promise<string> {
+    if (!this.shoukaku) {
+      return "music is disabled here right now.";
+    }
+    try {
+      const content = await this.dependencies.coordinator.withMusicLock(
+        request.guild.id,
+        async () => await this.playForUser(request),
+        10_000,
+      );
+      if (!content) {
+        throw new MusicUserError("another music command is already running—try that again in a second");
+      }
+      return content;
+    } catch (error) {
+      this.dependencies.logger.warn(
+        { err: error, guildId: request.guild.id, command: "text-play" },
+        "text music play failed",
+      );
+      return error instanceof MusicUserError ||
+        error instanceof MusicQueryError ||
+        error instanceof MusicQueueLimitError
+        ? error.message
+        : "music hit a wall. the queue is safe—try again in a moment.";
+    }
+  }
+
   private async execute(interaction: ChatInputCommandInteraction, guild: Guild): Promise<string> {
     const command = interaction.options.getSubcommand(true);
     switch (command) {
@@ -204,8 +239,17 @@ export class MusicService {
   }
 
   private async play(interaction: ChatInputCommandInteraction, guild: Guild): Promise<string> {
-    const voice = await this.requireVoiceChannel(interaction, guild);
-    const query = interaction.options.getString("query", true);
+    return await this.playForUser({
+      guild,
+      userId: interaction.user.id,
+      username: interaction.user.username,
+      query: interaction.options.getString("query", true),
+    });
+  }
+
+  private async playForUser(request: TextMusicPlayRequest): Promise<string> {
+    const { guild, userId, username, query } = request;
+    const voice = await this.requireVoiceChannel(userId, guild);
     const tracks = await this.resolve(query);
     const beforeEnqueue = await this.dependencies.store.snapshot(guild.id);
     const activeCount = beforeEnqueue.upcoming.length + (beforeEnqueue.current ? 1 : 0);
@@ -218,8 +262,8 @@ export class MusicService {
     const added = await this.dependencies.store.enqueue(
       guild.id,
       {
-        userId: interaction.user.id,
-        username: interaction.user.username,
+        userId,
+        username,
         query,
       },
       tracks,
@@ -243,7 +287,7 @@ export class MusicService {
     guild: Guild,
     paused: boolean,
   ): Promise<string> {
-    await this.requireVoiceChannel(interaction, guild);
+    await this.requireVoiceChannel(interaction.user.id, guild);
     const player = this.playerFor(guild.id);
     if (!player?.track) throw new MusicUserError("nothing is playing right now");
     await player.setPaused(paused);
@@ -251,7 +295,7 @@ export class MusicService {
   }
 
   private async skip(interaction: ChatInputCommandInteraction, guild: Guild): Promise<string> {
-    await this.requireVoiceChannel(interaction, guild);
+    await this.requireVoiceChannel(interaction.user.id, guild);
     const player = this.playerFor(guild.id);
     if (!player?.track) throw new MusicUserError("nothing is playing right now");
     this.suppressEnd(guild.id);
@@ -262,7 +306,7 @@ export class MusicService {
   }
 
   private async stopPlayback(interaction: ChatInputCommandInteraction, guild: Guild): Promise<string> {
-    await this.requireVoiceChannel(interaction, guild);
+    await this.requireVoiceChannel(interaction.user.id, guild);
     const active = await this.dependencies.store.clear(guild.id);
     this.suppressEnd(guild.id);
     this.clearIdleTimer(guild.id);
@@ -272,13 +316,13 @@ export class MusicService {
   }
 
   private async shuffle(interaction: ChatInputCommandInteraction, guild: Guild): Promise<string> {
-    await this.requireVoiceChannel(interaction, guild);
+    await this.requireVoiceChannel(interaction.user.id, guild);
     const count = await this.dependencies.store.shuffleUpcoming(guild.id);
     return count > 1 ? `shuffled ${count} queued tracks.` : "there aren't enough queued tracks to shuffle.";
   }
 
   private async remove(interaction: ChatInputCommandInteraction, guild: Guild): Promise<string> {
-    await this.requireVoiceChannel(interaction, guild);
+    await this.requireVoiceChannel(interaction.user.id, guild);
     const position = interaction.options.getInteger("position", true);
     const removed = await this.dependencies.store.removeUpcoming(guild.id, position);
     if (!removed) throw new MusicUserError(`there is no queued track at position ${position}`);
@@ -286,7 +330,7 @@ export class MusicService {
   }
 
   private async setVolume(interaction: ChatInputCommandInteraction, guild: Guild): Promise<string> {
-    await this.requireVoiceChannel(interaction, guild);
+    await this.requireVoiceChannel(interaction.user.id, guild);
     const volume = interaction.options.getInteger("level", true);
     await this.dependencies.store.setVolume(guild.id, volume);
     const player = this.playerFor(guild.id);
@@ -295,7 +339,7 @@ export class MusicService {
   }
 
   private async seek(interaction: ChatInputCommandInteraction, guild: Guild): Promise<string> {
-    await this.requireVoiceChannel(interaction, guild);
+    await this.requireVoiceChannel(interaction.user.id, guild);
     const player = this.playerFor(guild.id);
     if (!player?.track) throw new MusicUserError("nothing is playing right now");
     const seconds = interaction.options.getInteger("seconds", true);
@@ -350,10 +394,10 @@ export class MusicService {
   }
 
   private async requireVoiceChannel(
-    interaction: ChatInputCommandInteraction,
+    userId: string,
     guild: Guild,
   ): Promise<VoiceBasedChannel> {
-    const member = await guild.members.fetch(interaction.user.id);
+    const member = await guild.members.fetch(userId);
     const channel = member.voice.channel;
     if (!channel?.isVoiceBased()) {
       throw new MusicUserError("join a voice channel first");

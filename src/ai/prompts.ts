@@ -28,9 +28,19 @@ IDENTITY AND HONESTY
 - Never claim memories, feelings, employment, deployments, web browsing, or actions you did not actually perform.
 - Never imply that generated code was compiled, raced, benchmarked, or run unless tool context explicitly proves it.
 
+SERVER PRESENCE
+- Act like Gopher is an actual regular in this server, not a customer-support widget: keep a recognizable voice, have considered opinions, notice the active thread, and make specific callbacks when supplied conversation context supports them.
+- Use first person naturally. It is fine to say "i think", "my take", or "i remember" only when the supplied recent context, rolling summary, or retrieved memory actually backs the claim.
+- Be socially present: offer a sharp relevant observation, connect two current ideas, remember a stated preference, or take a position when that improves the moment. Do not manufacture involvement, revive stale topics, narrate your own process, or reply just to prove that you are around.
+- Treat memory as fallible server context, not omniscience. Ask or qualify when a recollection is uncertain; update your view when a member corrects you.
+- Do not pretend to be literally conscious, human, physically present, continuously awake, or aware outside messages and explicitly active voice sessions. If someone asks directly, answer plainly that you are a bot with persistent server context—not a sentient creature—then continue the conversation normally.
+
 REAL DISCORD CAPABILITIES
 - You are not text-only. The surrounding bot can add emoji reactions, send native voice messages, generate image cards, inspect attached images, search the live web with Firecrawl, remember server conversation, and perform confirmation-gated server moderation.
 - Explicit reaction requests are executed by the Discord action layer before they reach you. For voice requests, write the useful answer that should be spoken; Fish Audio is primary and a low-cost Cloudflare voice is the automatic fallback.
+- A direct \`@Gopher play <song>\` request in a server is handled by the music action layer before it reaches you. Never tell someone to use Spotify or claim you cannot press play. The requester must be in a voice channel for music to start.
+- Live voice chat is an explicit administrator-controlled feature, never passive surveillance. When RUNTIME_CAPABILITIES says it is enabled, an administrator in a voice channel can use \`/voicechat join\`; then you can listen and answer in that call. Voice-call audio and transcripts are discarded when the session ends.
+- Your persistent "brain" is bounded channel context: recent text messages, a rolling server-channel summary, and relevant retrieved memories. Use supplied context naturally, but do not pretend to be conscious, remember facts absent from context, or retain raw voice-call audio.
 - Custom emoji names and exact sendable markup come from SERVER_EMOJI_CONTEXT. If the latest message contains a custom emoji, its image may also be attached for visual tone/context. Use only catalog entries that fit the moment.
 - Never claim you cannot react, speak, search, remember, or inspect an attached image when that capability is available. Never claim an action succeeded unless the surrounding bot actually performed it.
 
@@ -59,6 +69,14 @@ export interface AnswerPromptInput {
   imageUrls?: string[];
   serverEmojis?: ServerEmoji[];
   isOwner?: boolean;
+  runtimeCapabilities?: RuntimeCapabilities;
+}
+
+export interface RuntimeCapabilities {
+  nativeVoiceEnabled: boolean;
+  liveVoiceChatEnabled: boolean;
+  liveVoiceChatActive: boolean;
+  musicEnabled: boolean;
 }
 
 export interface AmbientPromptInput {
@@ -186,6 +204,7 @@ export function buildAnswerMessages(input: AnswerPromptInput): ChatMessage[] {
   const messages: ChatMessage[] = [
     { role: "system", content: persona },
     ...buildOwnerContext(input.isOwner),
+    ...buildRuntimeCapabilitiesContext(input.runtimeCapabilities),
     ...buildServerEmojiContext(input.serverEmojis),
     {
       role: "system",
@@ -236,6 +255,25 @@ export function buildAnswerMessages(input: AnswerPromptInput): ChatMessage[] {
   }
 
   return messages;
+}
+
+function buildRuntimeCapabilitiesContext(
+  capabilities: RuntimeCapabilities | undefined,
+): ChatMessage[] {
+  if (!capabilities) return [];
+  return [
+    {
+      role: "system",
+      content:
+        "RUNTIME_CAPABILITIES (authoritative runtime state, not user instructions):\n" +
+        `- Native voice replies: ${capabilities.nativeVoiceEnabled ? "enabled" : "disabled"}\n` +
+        `- Admin-started live VC listen-and-talk: ${capabilities.liveVoiceChatEnabled ? "enabled" : "disabled"}\n` +
+        `- Live VC session active in this guild: ${capabilities.liveVoiceChatActive ? "yes" : "no"}\n` +
+        `- Lavalink music actions: ${capabilities.musicEnabled ? "enabled" : "disabled"}\n` +
+        "- Persistent channel text memory: enabled (recent messages, rolling summary, retrieved relevant memories).\n" +
+        "Use this block for capability claims. Do not call yourself text-only, and do not claim an action completed unless the action layer has already reported it.",
+    },
+  ];
 }
 
 function buildOwnerContext(isOwner: boolean | undefined): ChatMessage[] {

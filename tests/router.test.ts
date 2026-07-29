@@ -10,6 +10,7 @@ import {
   referencesRecentConversation,
   shouldRespond,
   stripBotMention,
+  voiceCapabilityStatusReply,
   wantsImageCard,
   wantsVoiceReply,
 } from "../src/discord/router.ts";
@@ -170,6 +171,30 @@ describe("Discord response routing", () => {
     expect(
       wantsVoiceReply("create a voice channel called bakchodi"),
     ).toBeFalse();
+  });
+
+  test("grounds questions about live voice listening in the actual capability state", () => {
+    const enabled = {
+      nativeVoiceEnabled: true,
+      liveVoiceChatEnabled: true,
+      liveVoiceChatActive: false,
+    };
+    expect(
+      voiceCapabilityStatusReply("maybe the bot can talk but can it listen", enabled),
+    ).toContain("/voicechat join");
+    expect(
+      voiceCapabilityStatusReply("you can listen u dumb fuck", enabled),
+    ).toContain("/voicechat join");
+    expect(
+      voiceCapabilityStatusReply("can it listen?", { ...enabled, liveVoiceChatActive: true }),
+    ).toContain("explicitly started VC session");
+    expect(
+      voiceCapabilityStatusReply("can it listen?", {
+        ...enabled,
+        liveVoiceChatEnabled: false,
+      }),
+    ).toContain("isn't enabled");
+    expect(voiceCapabilityStatusReply("listen to this song", enabled)).toBeUndefined();
   });
 
   test("distinguishes technical requests from casual chatter", () => {

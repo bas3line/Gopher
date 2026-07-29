@@ -24,6 +24,7 @@ import type { Logger } from "../logger.ts";
 import { MemoryStore } from "../memory/store.ts";
 import { MusicService } from "../music/service.ts";
 import { MusicStore } from "../music/store.ts";
+import { parseMusicTextPlayRequest } from "../music/query.ts";
 import { Coordinator, Semaphore } from "../infra/coordinator.ts";
 import type { WebSource } from "../types.ts";
 import { WebResearch, WebResearchError } from "../web/firecrawl.ts";
@@ -55,6 +56,7 @@ import {
   isTechnicalRequest,
   needsWebSearch,
   stripBotMention,
+  voiceCapabilityStatusReply,
   wantsImageCard,
   wantsVoiceReply,
 } from "./router.ts";
@@ -413,6 +415,14 @@ export class DiscordBot {
         return;
       }
 
+      const musicQuery = !ambient && message.guild
+        ? parseMusicTextPlayRequest(cleanContent)
+        : undefined;
+      if (musicQuery) {
+        await this.handleTextMusicPlay(message, guildId, username, musicQuery);
+        return;
+      }
+
       const result = await this.dependencies.coordinator.withChannelLock(
         message.channelId,
         async () => {
@@ -613,10 +623,61 @@ export class DiscordBot {
     }
   }
 
+  private async handleTextMusicPlay(
+    message: Message,
+    guildId: string,
+    username: string,
+    query: string,
+  ): Promise<void> {
+    const guild = message.guild;
+    if (!guild) return;
+
+    const content = this.voiceChat.hasActiveSession(guildId)
+      ? "live voice chat owns the VC right now. use `/voicechat leave` before music commands."
+      : this.music
+        ? await this.music.playFromText({
+            guild,
+            userId: message.author.id,
+            username,
+            query,
+          })
+        : "music is unavailable right now—try again in a moment.";
+    const sent = await message.reply({
+      content,
+      allowedMentions: { parse: [], repliedUser: false },
+    });
+    await this.dependencies.memory.recordMessage({
+      discordMessageId: sent.id,
+      guildId,
+      channelId: message.channelId,
+      userId: this.client.user?.id ?? "bot",
+      username: this.client.user?.username ?? "Gopher",
+      role: "assistant",
+      content,
+    });
+    await this.maybeSummarize(guildId, message.channelId);
+  }
+
   private async answer(input: AnswerInput): Promise<AnswerOutput | undefined> {
     const { config, memory, web, textAI, visionAI } = this.dependencies;
     const useVision = input.imageUrls.length > 0;
     const serverEmojis = this.serverEmojis(input.guildId);
+    const voiceCapabilityReply = voiceCapabilityStatusReply(input.question, {
+      nativeVoiceEnabled: this.dependencies.voice.enabled,
+      liveVoiceChatEnabled:
+        config.voiceChat.enabled &&
+        this.dependencies.voiceChatStt.enabled &&
+        this.dependencies.voiceChatVoice.enabled,
+      liveVoiceChatActive:
+        !input.guildId.startsWith("dm:") && this.voiceChat.hasActiveSession(input.guildId),
+    });
+    if (voiceCapabilityReply) {
+      return await this.withVoice(input, {
+        text: voiceCapabilityReply,
+        rawAnswer: voiceCapabilityReply,
+        sources: [],
+      });
+    }
     const quickReply =
       !input.ambient &&
       !useVision &&
@@ -724,6 +785,17 @@ export class DiscordBot {
               serverEmojis,
               isOwner: input.isOwner,
               ...(useVision ? { imageUrls: input.imageUrls } : {}),
+              runtimeCapabilities: {
+                nativeVoiceEnabled: this.dependencies.voice.enabled,
+                liveVoiceChatEnabled:
+                  config.voiceChat.enabled &&
+                  this.dependencies.voiceChatStt.enabled &&
+                  this.dependencies.voiceChatVoice.enabled,
+                liveVoiceChatActive:
+                  !input.guildId.startsWith("dm:") &&
+                  this.voiceChat.hasActiveSession(input.guildId),
+                musicEnabled: this.music?.enabled ?? false,
+              },
             });
       const completion = await this.semaphore.use(() =>
         completionClient.complete(promptMessages, model),

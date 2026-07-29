@@ -13,6 +13,12 @@ export interface ResponseDecisionInput {
 
 export type ResponseDecision = "direct" | "ambient" | "ignore";
 
+export interface VoiceCapabilityState {
+  nativeVoiceEnabled: boolean;
+  liveVoiceChatEnabled: boolean;
+  liveVoiceChatActive: boolean;
+}
+
 const goSignals =
   /\b(golang|goroutine|goroutines|go\.mod|go\.sum|gofmt|go test|go vet|pprof|channel|mutex|context\.context|interface|struct|panic|data race|race detector)\b/i;
 const directAddress =
@@ -82,6 +88,49 @@ export function wantsVoiceReply(content: string): boolean {
     /\b(?:voice\s+(?:message|note|reply)|audio\s+reply)\b/i.test(content) ||
     /\b(?:voice|audio)\s+(?:mein|me)\b/i.test(content)
   );
+}
+
+/**
+ * Keeps simple questions about the bot's ears/mouth grounded in actual runtime
+ * capability instead of leaving a casual model reply room to hallucinate.
+ */
+export function voiceCapabilityStatusReply(
+  content: string,
+  state: VoiceCapabilityState,
+): string | undefined {
+  const asksListening =
+    /\b(?:can|could|will|would)\s+(?:you|u|it|the\s+bot|gopher)\s+(?:actually\s+)?(?:listen|hear)\b/iu.test(
+      content,
+    ) ||
+    /\bdoes\s+(?:it|the\s+bot|gopher)\s+(?:actually\s+)?(?:listen|hear)\b/iu.test(
+      content,
+    ) ||
+    /\b(?:you|u|it|the\s+bot|gopher)\s+(?:can|could)\s+(?:actually\s+)?(?:listen|hear)\b(?!\s+to\b)/iu.test(
+      content,
+    );
+  if (asksListening) {
+    if (!state.liveVoiceChatEnabled) {
+      return state.nativeVoiceEnabled
+        ? "i can send voice replies, but live VC listening isn't enabled right now."
+        : "live VC listening isn't enabled right now.";
+    }
+    return state.liveVoiceChatActive
+      ? "yeah, i'm listening in this explicitly started VC session. i don't save call audio or transcripts."
+      : "yeah. an admin can use `/voicechat join` while in a VC, then i can listen and talk. i don't passively listen or save call audio/transcripts.";
+  }
+
+  const asksSpeaking =
+    /\b(?:can|could|will|would)\s+(?:you|u|it|the\s+bot|gopher)\s+(?:actually\s+)?(?:talk|speak)\b/iu.test(
+      content,
+    ) ||
+    /\bdoes\s+(?:it|the\s+bot|gopher)\s+(?:actually\s+)?(?:talk|speak)\b/iu.test(
+      content,
+    );
+  if (!asksSpeaking) return undefined;
+  if (!state.nativeVoiceEnabled) return "voice replies aren't configured right now.";
+  return state.liveVoiceChatEnabled
+    ? "yeah. i can send voice replies, and an admin can use `/voicechat join` for a live VC conversation."
+    : "yeah. ask for a voice reply and i'll send one.";
 }
 
 export function isAnswerRequest(content: string): boolean {

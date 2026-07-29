@@ -4,7 +4,12 @@ import {
   formatMusicQueue,
   musicDuration,
 } from "../src/music/format.ts";
-import { MusicQueryError, musicIdentifier } from "../src/music/query.ts";
+import {
+  DEFAULT_MUSIC_SEARCH,
+  MusicQueryError,
+  musicIdentifier,
+  parseMusicTextPlayRequest,
+} from "../src/music/query.ts";
 
 describe("music source guardrails", () => {
   test("uses YouTube search for plain text and accepts explicit supported search prefixes", () => {
@@ -23,6 +28,28 @@ describe("music source guardrails", () => {
     expect(() => musicIdentifier("https://example.com/track")).toThrow(MusicQueryError);
     expect(() => musicIdentifier("https://")).toThrow(MusicQueryError);
     expect(() => musicIdentifier("ytsearch:   ")).toThrow(MusicQueryError);
+  });
+});
+
+describe("plain-language music requests", () => {
+  test("turns an explicit request for generic music into a safe default search", () => {
+    expect(parseMusicTextPlayRequest("play some music lil bro")).toBe(
+      DEFAULT_MUSIC_SEARCH,
+    );
+    expect(parseMusicTextPlayRequest("could you put on music please")).toBe(
+      DEFAULT_MUSIC_SEARCH,
+    );
+  });
+
+  test("keeps a specific song or artist query and ignores unrelated chat", () => {
+    expect(parseMusicTextPlayRequest("play Midnight City please")).toBe(
+      "Midnight City",
+    );
+    expect(parseMusicTextPlayRequest("queue some music by Kendrick Lamar")).toBe(
+      "Kendrick Lamar",
+    );
+    expect(parseMusicTextPlayRequest("why is this music so loud?")).toBeUndefined();
+    expect(parseMusicTextPlayRequest("play ".repeat(200))).toBeUndefined();
   });
 });
 
