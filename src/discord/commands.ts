@@ -50,6 +50,86 @@ export const commandData = [
     .setName("about")
     .setDescription("Explain what this bot is and what it can do"),
   new SlashCommandBuilder()
+    .setName("music")
+    .setDescription("Queue and control music in your voice channel")
+    .setDMPermission(false)
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("play")
+        .setDescription("Play a URL, search YouTube, or add a playlist")
+        .addStringOption((option) =>
+          option
+            .setName("query")
+            .setDescription("A URL or a song, artist, or album search")
+            .setRequired(true)
+            .setMinLength(1)
+            .setMaxLength(500),
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand.setName("queue").setDescription("Show the current queue"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand.setName("now").setDescription("Show what is playing now"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand.setName("history").setDescription("Show recently played tracks"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand.setName("pause").setDescription("Pause playback"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand.setName("resume").setDescription("Resume playback"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand.setName("skip").setDescription("Skip the current track"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("remove")
+        .setDescription("Remove a track from the queue")
+        .addIntegerOption((option) =>
+          option
+            .setName("position")
+            .setDescription("Queue position, starting at 1")
+            .setRequired(true)
+            .setMinValue(1)
+            .setMaxValue(100),
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand.setName("shuffle").setDescription("Shuffle upcoming tracks"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("volume")
+        .setDescription("Set the server music volume")
+        .addIntegerOption((option) =>
+          option
+            .setName("level")
+            .setDescription("Volume percentage")
+            .setRequired(true)
+            .setMinValue(0)
+            .setMaxValue(200),
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("seek")
+        .setDescription("Jump to a point in the current track")
+        .addIntegerOption((option) =>
+          option
+            .setName("seconds")
+            .setDescription("Seconds from the start")
+            .setRequired(true)
+            .setMinValue(0)
+            .setMaxValue(21_600),
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand.setName("stop").setDescription("Clear the queue and leave voice"),
+    ),
+  new SlashCommandBuilder()
     .setName("server")
     .setDescription("Admin-only server actions with confirmation")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
@@ -223,6 +303,6 @@ export const commandData = [
 export const aboutText =
   "**Gopher** is an AI bot—not a human—with dry group-chat energy and senior Go experience. " +
   "It remembers channel context in PostgreSQL, retrieves older relevant chat, can inspect images, " +
-  "uses Firecrawl for explicit or time-sensitive web research, and can send Fish Audio voice replies. " +
-  "Mention it, reply to it, use `/ask`, `/voice`, `/search`, or `/card`. Server administrators can use confirmed `/server` actions. It never executes " +
+  "uses Firecrawl for explicit or time-sensitive web research, can send Fish Audio voice replies, and has a persistent Lavalink music queue. " +
+  "Mention it, reply to it, use `/ask`, `/voice`, `/search`, `/card`, or `/music play`. Server administrators can use confirmed `/server` actions. It never executes " +
   "pasted code, and its takes are not proof: run your tests.";

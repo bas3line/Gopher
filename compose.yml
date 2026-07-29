@@ -41,6 +41,35 @@ services:
     networks: [bot-internal]
     security_opt: [no-new-privileges:true]
 
+  lavalink-plugin-init:
+    profiles: [music]
+    image: ghcr.io/lavalink-devs/lavalink:4-alpine
+    restart: "no"
+    user: "0:0"
+    entrypoint: [/bin/sh, -ec, 'mkdir -p /plugins && chown -R lavalink:nogroup /plugins']
+    command: []
+    volumes:
+      - lavalink-plugins:/plugins
+    networks: [bot-internal]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+
+  lavalink:
+    profiles: [music]
+    image: ghcr.io/lavalink-devs/lavalink:4-alpine
+    restart: unless-stopped
+    init: true
+    environment:
+      LAVALINK_SERVER_PASSWORD: ${LAVALINK_PASSWORD:?LAVALINK_PASSWORD is required for music}
+    volumes:
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
+      - lavalink-plugins:/opt/Lavalink/plugins
+    depends_on:
+      lavalink-plugin-init:
+        condition: service_completed_successfully
+    networks: [bot-internal, bot-egress]
+    security_opt: [no-new-privileges:true]
+
   bot:
     profiles: [bot]
     build:
@@ -77,3 +106,6 @@ networks:
   bot-internal:
     internal: true
   bot-egress:
+
+volumes:
+  lavalink-plugins:

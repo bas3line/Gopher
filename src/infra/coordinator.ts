@@ -125,7 +125,23 @@ export class Coordinator {
     operation: () => Promise<T>,
     waitMs = 0,
   ): Promise<T | undefined> {
-    const key = `lock:channel:${channelId}`;
+    return await this.withLock(`channel:${channelId}`, operation, waitMs);
+  }
+
+  async withMusicLock<T>(
+    guildId: string,
+    operation: () => Promise<T>,
+    waitMs = 0,
+  ): Promise<T | undefined> {
+    return await this.withLock(`music:${guildId}`, operation, waitMs);
+  }
+
+  private async withLock<T>(
+    scope: string,
+    operation: () => Promise<T>,
+    waitMs: number,
+  ): Promise<T | undefined> {
+    const key = `lock:${scope}`;
     const token = randomUUID();
     const deadline = Date.now() + waitMs;
     let acquired = await this.redis.set(key, token, "EX", 300, "NX");

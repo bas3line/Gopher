@@ -16,6 +16,8 @@ export function createLogger(config: Pick<AppConfig, "logLevel">) {
         "config.cloudflare.apiToken",
         "config.discordToken",
         "config.firecrawlApiKey",
+        "config.music.lavalinkPassword",
+        "lavalinkPassword",
       ],
       censor: "[REDACTED]",
     },

@@ -50,6 +50,15 @@ describe("configuration", () => {
     expect(config.fishAudio.model).toBe("s2-pro");
     expect(config.fishAudio.maxCharacters).toBe(1_800);
     expect(config.fishAudio.apiKey).toBeUndefined();
+    expect(config.music).toEqual({
+      enabled: false,
+      lavalinkUrl: "lavalink:2333",
+      lavalinkSecure: false,
+      defaultVolume: 65,
+      maxQueueLength: 100,
+      maxPlaylistTracks: 25,
+      idleTimeoutSeconds: 120,
+    });
     expect(config.interactionMode).toBe("ambient");
     expect(config.ambientReplyChance).toBe(0.65);
     expect(config.ambientEvaluationCooldownSeconds).toBe(12);
@@ -98,5 +107,19 @@ describe("configuration", () => {
     expect(config.openAI.baseUrl).toBe(
       "http://127.0.0.1:8080/v1/chat/completions",
     );
+  });
+
+  test("requires a Lavalink password only when music is enabled", () => {
+    expect(() =>
+      loadConfig({ ...requiredEnvironment, MUSIC_ENABLED: "true" }),
+    ).toThrow("is required when MUSIC_ENABLED=true");
+    expect(
+      loadConfig({
+        ...requiredEnvironment,
+        MUSIC_ENABLED: "true",
+        LAVALINK_PASSWORD: "test-only-lavalink-password",
+        MUSIC_DEFAULT_VOLUME: "80",
+      }).music,
+    ).toMatchObject({ enabled: true, defaultVolume: 80 });
   });
 });

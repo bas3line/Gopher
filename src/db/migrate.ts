@@ -5,6 +5,10 @@ const migrations = [
     version: "001_initial",
     path: new URL("./migrations/001_initial.sql", import.meta.url),
   },
+  {
+    version: "002_music",
+    path: new URL("./migrations/002_music.sql", import.meta.url),
+  },
 ] as const;
 
 export async function migrate(pool: DatabasePool): Promise<void> {

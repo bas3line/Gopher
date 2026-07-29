@@ -7,6 +7,7 @@ import { startHealthServer } from "./health.ts";
 import { Coordinator } from "./infra/coordinator.ts";
 import { createLogger } from "./logger.ts";
 import { MemoryStore } from "./memory/store.ts";
+import { MusicStore } from "./music/store.ts";
 import { CloudflareAuraVoice } from "./voice/cloudflare-aura.ts";
 import { FallbackVoice } from "./voice/fallback.ts";
 import { FishAudioVoice } from "./voice/fish-audio.ts";
@@ -25,6 +26,7 @@ if (!config.discordToken) {
 const pool = createDatabasePool(config.databaseUrl, logger);
 const coordinator = new Coordinator(config.redisUrl);
 const memory = new MemoryStore(pool);
+const musicStore = new MusicStore(pool, config.music.defaultVolume);
 const textAI = new AIClient({
   endpoint: config.text.endpoint,
   apiKey: config.text.apiKey,
@@ -76,6 +78,7 @@ const bot = new DiscordBot({
   summaryAI,
   visionAI,
   memory,
+  musicStore,
   coordinator,
   web,
   voice,

@@ -21,6 +21,8 @@ import {
 } from "../ai/prompts.ts";
 import type { Logger } from "../logger.ts";
 import { MemoryStore } from "../memory/store.ts";
+import { MusicService } from "../music/service.ts";
+import { MusicStore } from "../music/store.ts";
 import { Coordinator, Semaphore } from "../infra/coordinator.ts";
 import type { WebSource } from "../types.ts";
 import { WebResearch, WebResearchError } from "../web/firecrawl.ts";
@@ -88,6 +90,7 @@ export class DiscordBot {
   private readonly client: Client;
   private readonly moderation: ServerModeration;
   private readonly semaphore: Semaphore;
+  private music: MusicService | undefined;
 
   constructor(
     private readonly dependencies: {
@@ -96,6 +99,7 @@ export class DiscordBot {
       summaryAI: CompletionClient;
       visionAI: CompletionClient;
       memory: MemoryStore;
+      musicStore: MusicStore;
       coordinator: Coordinator;
       web: WebResearch;
       voice: VoiceSynthesizer;
@@ -114,6 +118,7 @@ export class DiscordBot {
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.DirectMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildVoiceStates,
       ],
       partials: [Partials.Channel],
       allowedMentions: { parse: [], repliedUser: false },
@@ -124,6 +129,19 @@ export class DiscordBot {
         ],
       },
     });
+    try {
+      // Shoukaku's Discord.js connector subscribes to clientReady itself, so it
+      // must exist before login rather than being created from the ready handler.
+      this.music = new MusicService({
+        client: this.client,
+        config: this.dependencies.config.music,
+        coordinator: this.dependencies.coordinator,
+        store: this.dependencies.musicStore,
+        logger: this.dependencies.logger,
+      });
+    } catch (error) {
+      this.dependencies.logger.error({ err: error }, "failed to configure music service");
+    }
   }
 
   get ready(): boolean {
@@ -139,6 +157,15 @@ export class DiscordBot {
         },
         "Discord bot ready",
       );
+      if (this.music) {
+        try {
+          await this.music.start();
+        } catch (error) {
+          await this.music.stop();
+          this.music = undefined;
+          this.dependencies.logger.error({ err: error }, "failed to start music service");
+        }
+      }
       try {
         await this.registerCommands();
       } catch (error) {
@@ -200,6 +227,7 @@ export class DiscordBot {
   }
 
   async stop(): Promise<void> {
+    await this.music?.stop();
     this.client.destroy();
   }
 
@@ -423,6 +451,17 @@ export class DiscordBot {
         flags: MessageFlags.Ephemeral,
         allowedMentions: { parse: [] },
       });
+      return;
+    }
+    if (interaction.commandName === "music") {
+      if (!this.music) {
+        await interaction.reply({
+          content: "music is unavailable right now—try again in a moment.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      await this.music.handle(interaction);
       return;
     }
 

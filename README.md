@@ -18,7 +18,8 @@ make moderation decisions on its own.
 - **PostgreSQL** for chat memory, lexical retrieval, durable summaries, and cached research.
 - **Redis** for deduplication, rate limits, locks, and one-shot moderation confirmations.
 - **Firecrawl** for opt-in web research, plus Fish Audio and Cloudflare Aura-2 for voice replies.
-- **Docker Compose** to run the bot, PostgreSQL, and Redis together.
+- **Lavalink** for durable, per-server voice playback and YouTube search—inside Compose, never as a shell-out downloader.
+- **Docker Compose** to run the bot, PostgreSQL, Redis, and optional music node together.
 
 The bot can participate in ambient chat or reply only when mentioned. It keeps model context bounded
 with recent messages, PostgreSQL full-text retrieval, and rolling summaries rather than pretending
@@ -45,11 +46,21 @@ Open `.env` and set:
 Vision, web research, and voice are optional. Add their keys only if you want those features.
 Never commit `.env`.
 
+To enable music, set `MUSIC_ENABLED=true`, generate a unique `LAVALINK_PASSWORD`, and start the
+music profile too. Lavalink stays on the internal Docker network; do not publish port `2333`.
+
 Start everything:
 
 ```bash
 docker compose --profile bot up -d --build
 docker compose logs -f bot
+```
+
+With music enabled:
+
+```bash
+docker compose --profile bot --profile music up -d --build
+docker compose logs -f lavalink bot
 ```
 
 Gopher runs database migrations when it starts. Its health endpoint is available inside the container
@@ -59,8 +70,13 @@ at `http://127.0.0.1:3000/healthz`.
 
 Create a Discord application, add a bot, and enable **Message Content Intent**. Invite it with the
 `bot` and `applications.commands` scopes, then give it only the permissions it needs: View Channels,
-Send Messages, Read Message History, Add Reactions, Attach Files, Send Voice Messages, and Use
-Application Commands.
+Send Messages, Read Message History, Add Reactions, Attach Files, Connect, Speak, Send Voice
+Messages, and Use Application Commands.
+
+Use `/music play <song or URL>` after joining voice. Gopher persists queues and volume in PostgreSQL;
+`/music queue`, `/music now`, `/music pause`, `/music resume`, `/music skip`, `/music remove`,
+`/music shuffle`, `/music volume`, `/music seek`, `/music history`, and `/music stop` cover the rest.
+Music history is capped at the latest 100 completed tracks per server.
 
 `/server` moderation commands need extra Discord permissions and always require an administrator's
 explicit, expiring confirmation. The model never executes moderation actions.

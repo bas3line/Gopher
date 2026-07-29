@@ -77,6 +77,23 @@ const configSchema = z
       .min(100)
       .max(5_000)
       .default(1_800),
+    MUSIC_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    LAVALINK_URL: z
+      .string()
+      .regex(/^[a-z0-9.-]+:\d{2,5}$/i, "must be a host:port pair")
+      .default("lavalink:2333"),
+    LAVALINK_PASSWORD: optionalTrimmed,
+    LAVALINK_SECURE: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    MUSIC_DEFAULT_VOLUME: z.coerce.number().int().min(0).max(200).default(65),
+    MUSIC_MAX_QUEUE_LENGTH: z.coerce.number().int().min(1).max(500).default(100),
+    MUSIC_MAX_PLAYLIST_TRACKS: z.coerce.number().int().min(1).max(100).default(25),
+    MUSIC_IDLE_TIMEOUT_SECONDS: z.coerce.number().int().min(30).max(3_600).default(120),
     DATABASE_URL: z.string().min(1),
     REDIS_URL: z.string().min(1),
     INTERACTION_MODE: z.enum(["mentions", "ambient"]).default("ambient"),
@@ -139,6 +156,13 @@ const configSchema = z
         });
       }
     }
+    if (value.MUSIC_ENABLED && !value.LAVALINK_PASSWORD) {
+      context.addIssue({
+        code: "custom",
+        path: ["LAVALINK_PASSWORD"],
+        message: "is required when MUSIC_ENABLED=true",
+      });
+    }
   });
 
 export interface AppConfig {
@@ -173,6 +197,16 @@ export interface AppConfig {
     referenceId: string;
     model: string;
     maxCharacters: number;
+  };
+  music: {
+    enabled: boolean;
+    lavalinkUrl: string;
+    lavalinkPassword?: string;
+    lavalinkSecure: boolean;
+    defaultVolume: number;
+    maxQueueLength: number;
+    maxPlaylistTracks: number;
+    idleTimeoutSeconds: number;
   };
   databaseUrl: string;
   redisUrl: string;
@@ -233,6 +267,18 @@ export function loadConfig(
       referenceId: value.FISH_AUDIO_REFERENCE_ID,
       model: value.FISH_AUDIO_MODEL,
       maxCharacters: value.FISH_AUDIO_MAX_CHARACTERS,
+    },
+    music: {
+      enabled: value.MUSIC_ENABLED,
+      lavalinkUrl: value.LAVALINK_URL,
+      ...(value.LAVALINK_PASSWORD
+        ? { lavalinkPassword: value.LAVALINK_PASSWORD }
+        : {}),
+      lavalinkSecure: value.LAVALINK_SECURE,
+      defaultVolume: value.MUSIC_DEFAULT_VOLUME,
+      maxQueueLength: value.MUSIC_MAX_QUEUE_LENGTH,
+      maxPlaylistTracks: value.MUSIC_MAX_PLAYLIST_TRACKS,
+      idleTimeoutSeconds: value.MUSIC_IDLE_TIMEOUT_SECONDS,
     },
     databaseUrl: value.DATABASE_URL,
     redisUrl: value.REDIS_URL,
