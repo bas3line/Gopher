@@ -31,6 +31,12 @@ const queueColumns = `
   encoded_track, title, author, uri, artwork_url, duration_ms, queue_state,
   queue_order, created_at, started_at, completed_at
 `;
+const itemQueueColumns = `
+  item.id, item.guild_id, item.requested_by_user_id, item.requested_by_username,
+  item.source_query, item.encoded_track, item.title, item.author, item.uri,
+  item.artwork_url, item.duration_ms, item.queue_state, item.queue_order,
+  item.created_at, item.started_at, item.completed_at
+`;
 const historyRetentionLimit = 100;
 
 export class MusicQueueLimitError extends Error {}
@@ -145,7 +151,7 @@ export class MusicStore {
          SET queue_state = 'playing', started_at = now(), completed_at = NULL
          FROM next_item
          WHERE item.id = next_item.id
-         RETURNING ${queueColumns}`,
+         RETURNING ${itemQueueColumns}`,
         [guildId],
       );
       return result.rows[0] ? toQueueItem(result.rows[0]) : undefined;
@@ -203,7 +209,7 @@ export class MusicStore {
          DELETE FROM music_queue_items AS item
          USING selected
          WHERE item.id = selected.id
-         RETURNING ${queueColumns}`,
+         RETURNING ${itemQueueColumns}`,
         [guildId, position],
       );
       return result.rows[0] ? toQueueItem(result.rows[0]) : undefined;
