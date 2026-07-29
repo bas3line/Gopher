@@ -60,6 +60,10 @@ describe("plain-language music requests", () => {
       kind: "play",
       query: "california love",
     });
+    expect(parseMusicTextCommand("how about you play california love lil bro")).toEqual({
+      kind: "play",
+      query: "california love",
+    });
     expect(parseMusicTextCommand("skip this song")).toEqual({ kind: "skip" });
     expect(parseMusicTextCommand("what's playing?")).toEqual({ kind: "now" });
     expect(parseMusicTextCommand("stop being a clown")).toBeUndefined();

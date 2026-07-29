@@ -76,6 +76,7 @@ function normalizeTextMusicInput(input: string): string {
   return input
     .trim()
     .replace(/^(?:(?:hey|yo|bro|gopher|dude|man)\s*[,!]*\s*)+/iu, "")
+    .replace(/^(?:(?:how\s+about|what\s+if)\s+you\s+)/iu, "")
     .trim();
 }
 

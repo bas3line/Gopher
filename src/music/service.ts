@@ -444,9 +444,19 @@ export class MusicService {
     userId: string,
     guild: Guild,
   ): Promise<VoiceBasedChannel> {
-    const member = await guild.members.fetch(userId);
-    const channel = member.voice.channel;
-    if (!channel?.isVoiceBased()) {
+    let channel: VoiceBasedChannel | null;
+    try {
+      // A GuildMember REST fetch does not refresh its voice state. Fetch the
+      // VoiceState itself so a just-joined requester is not falsely rejected.
+      channel = (await guild.voiceStates.fetch(userId, { force: true })).channel;
+    } catch (error) {
+      this.dependencies.logger.warn(
+        { err: error, guildId: guild.id, userId },
+        "could not verify requester voice state",
+      );
+      throw new MusicUserError("couldn't verify your voice channel—try again in a second");
+    }
+    if (!channel) {
       throw new MusicUserError("join a voice channel first");
     }
     const botChannelId = guild.members.me?.voice.channelId;
