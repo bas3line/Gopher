@@ -3,35 +3,88 @@ export class MusicQueryError extends Error {}
 /** A safe, unsurprising default for an explicit "play some music" request. */
 export const DEFAULT_MUSIC_SEARCH = "chill music mix";
 
+export type TextMusicCommand =
+  | { kind: "play"; query: string }
+  | { kind: "pause" }
+  | { kind: "resume" }
+  | { kind: "skip" }
+  | { kind: "stop" }
+  | { kind: "queue" }
+  | { kind: "now" };
+
 /**
- * Recognizes a direct text request to queue music. The caller must still be in
- * a voice channel; this parser never turns ordinary background chat into a
- * music action on its own.
+ * Recognizes deliberate text music controls. The caller must still be in a
+ * voice channel for controls that mutate playback; this parser never turns
+ * ordinary background chat into a music action on its own.
  */
-export function parseMusicTextPlayRequest(input: string): string | undefined {
+export function parseMusicTextCommand(input: string): TextMusicCommand | undefined {
+  const cleaned = normalizeTextMusicInput(input);
+  if (!cleaned) return undefined;
+
+  const simple = cleanTextMusicControl(cleaned);
+  if (/^(?:stop|turn\s+off|kill)(?:\s+(?:(?:(?:this|that|the)\s+)?(?:music|song|track|playback)|(?:this|that|it)))?$/iu.test(simple)) {
+    return { kind: "stop" };
+  }
+  if (/^(?:pause|hold)(?:\s+(?:(?:(?:this|that|the)\s+)?(?:music|song|track|playback)|(?:this|that|it)))?$/iu.test(simple)) {
+    return { kind: "pause" };
+  }
+  if (/^(?:resume|unpause|continue)(?:\s+(?:(?:(?:this|that|the)\s+)?(?:music|song|track|playback)|(?:this|that|it)))?$/iu.test(simple)) {
+    return { kind: "resume" };
+  }
+  if (/^(?:skip|next)(?:\s+(?:(?:(?:this|that|the)\s+)?(?:music|song|track)|(?:this|that|it)))?$/iu.test(simple)) {
+    return { kind: "skip" };
+  }
+  if (/^(?:show\s+)?(?:the\s+)?(?:queue|playlist)(?:\s+(?:please|now))?$/iu.test(simple)) {
+    return { kind: "queue" };
+  }
+  if (/^(?:(?:what(?:'s|\s+is)|whats)\s+(?:playing|on)|now(?:\s+playing)?)$/iu.test(simple)) {
+    return { kind: "now" };
+  }
+
   const match =
     /^(?:(?:please|pls|plz)\s+)?(?:(?:can|could|would)\s+you\s+)?(?:play|queue|put\s+on)(?:\s+(.+?))?[.!?]*$/iu.exec(
-      input.trim(),
+      cleaned,
     );
   if (!match) return undefined;
 
   const requested = (match[1] ?? "")
     .replace(/(?:\s+(?:please|pls|plz|bro|lil\s+bro|gopher))+\s*$/iu, "")
     .trim();
-  if (!requested) return DEFAULT_MUSIC_SEARCH;
+  if (!requested) return { kind: "play", query: DEFAULT_MUSIC_SEARCH };
 
   if (
     /^(?:(?:some|any|a\s+little|something)\s+)?(?:music|songs?|tunes?|beats?|vibes?|a\s+playlist)$/iu.test(
       requested,
     )
   ) {
-    return DEFAULT_MUSIC_SEARCH;
+    return { kind: "play", query: DEFAULT_MUSIC_SEARCH };
   }
 
   const artistOnly =
     /^(?:(?:some|any)\s+)?music\s+(?:by|from)\s+(.+)$/iu.exec(requested)?.[1];
   const query = (artistOnly ?? requested).trim();
-  return query.length > 0 && query.length <= 500 ? query : undefined;
+  return query.length > 0 && query.length <= 500 ? { kind: "play", query } : undefined;
+}
+
+/** Backward-compatible helper for callers that only want play actions. */
+export function parseMusicTextPlayRequest(input: string): string | undefined {
+  const command = parseMusicTextCommand(input);
+  return command?.kind === "play" ? command.query : undefined;
+}
+
+function normalizeTextMusicInput(input: string): string {
+  return input
+    .trim()
+    .replace(/^(?:(?:hey|yo|bro|gopher|dude|man)\s*[,!]*\s*)+/iu, "")
+    .trim();
+}
+
+function cleanTextMusicControl(input: string): string {
+  return input
+    .replace(/^(?:(?:please|pls|plz)\s+)?(?:(?:can|could|would)\s+you\s+)?/iu, "")
+    .replace(/(?:\s+(?:please|pls|plz|bro|lil\s+bro|gopher))+(?:\s*[.!?]+)?$/iu, "")
+    .replace(/[.!?]+$/u, "")
+    .trim();
 }
 
 export function musicIdentifier(input: string): string {

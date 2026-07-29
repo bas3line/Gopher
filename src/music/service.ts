@@ -16,7 +16,7 @@ import type { AppConfig } from "../config.ts";
 import type { Coordinator } from "../infra/coordinator.ts";
 import type { Logger } from "../logger.ts";
 import { formatMusicHistory, formatMusicQueue, musicTrackLabel } from "./format.ts";
-import { MusicQueryError, musicIdentifier } from "./query.ts";
+import { MusicQueryError, musicIdentifier, type TextMusicCommand } from "./query.ts";
 import { MusicQueueLimitError, MusicStore } from "./store.ts";
 import type { QueuedMusicTrack, ResolvedMusicTrack } from "./types.ts";
 
@@ -35,6 +35,13 @@ export interface TextMusicPlayRequest {
   userId: string;
   username: string;
   query: string;
+}
+
+export interface TextMusicCommandRequest {
+  guild: Guild;
+  userId: string;
+  username: string;
+  command: TextMusicCommand;
 }
 
 export class MusicService {
@@ -178,15 +185,15 @@ export class MusicService {
     }
   }
 
-  /** Executes an explicit @Gopher play request without faking a slash interaction. */
-  async playFromText(request: TextMusicPlayRequest): Promise<string> {
+  /** Executes an explicit @Gopher music control without faking a slash interaction. */
+  async handleTextCommand(request: TextMusicCommandRequest): Promise<string> {
     if (!this.shoukaku) {
       return "music is disabled here right now.";
     }
     try {
       const content = await this.dependencies.coordinator.withMusicLock(
         request.guild.id,
-        async () => await this.playForUser(request),
+        async () => await this.executeTextCommand(request),
         10_000,
       );
       if (!content) {
@@ -195,8 +202,8 @@ export class MusicService {
       return content;
     } catch (error) {
       this.dependencies.logger.warn(
-        { err: error, guildId: request.guild.id, command: "text-play" },
-        "text music play failed",
+        { err: error, guildId: request.guild.id, command: `text-${request.command.kind}` },
+        "text music command failed",
       );
       return error instanceof MusicUserError ||
         error instanceof MusicQueryError ||
@@ -204,6 +211,14 @@ export class MusicService {
         ? error.message
         : "music hit a wall. the queue is safe—try again in a moment.";
     }
+  }
+
+  /** Compatibility wrapper for the original direct-text play integration. */
+  async playFromText(request: TextMusicPlayRequest): Promise<string> {
+    return await this.handleTextCommand({
+      ...request,
+      command: { kind: "play", query: request.query },
+    });
   }
 
   private async execute(interaction: ChatInputCommandInteraction, guild: Guild): Promise<string> {
@@ -235,6 +250,26 @@ export class MusicService {
         return await this.seek(interaction, guild);
       default:
         throw new MusicUserError("that music command is not wired up yet");
+    }
+  }
+
+  private async executeTextCommand(request: TextMusicCommandRequest): Promise<string> {
+    const { command, guild, userId, username } = request;
+    switch (command.kind) {
+      case "play":
+        return await this.playForUser({ guild, userId, username, query: command.query });
+      case "queue":
+        return formatMusicQueue(await this.dependencies.store.snapshot(guild.id));
+      case "now":
+        return await this.nowPlaying(guild.id);
+      case "pause":
+        return await this.setPausedForUser(userId, guild, true);
+      case "resume":
+        return await this.setPausedForUser(userId, guild, false);
+      case "skip":
+        return await this.skipForUser(userId, guild);
+      case "stop":
+        return await this.stopPlaybackForUser(userId, guild);
     }
   }
 
@@ -287,7 +322,11 @@ export class MusicService {
     guild: Guild,
     paused: boolean,
   ): Promise<string> {
-    await this.requireVoiceChannel(interaction.user.id, guild);
+    return await this.setPausedForUser(interaction.user.id, guild, paused);
+  }
+
+  private async setPausedForUser(userId: string, guild: Guild, paused: boolean): Promise<string> {
+    await this.requireVoiceChannel(userId, guild);
     const player = this.playerFor(guild.id);
     if (!player?.track) throw new MusicUserError("nothing is playing right now");
     await player.setPaused(paused);
@@ -295,7 +334,11 @@ export class MusicService {
   }
 
   private async skip(interaction: ChatInputCommandInteraction, guild: Guild): Promise<string> {
-    await this.requireVoiceChannel(interaction.user.id, guild);
+    return await this.skipForUser(interaction.user.id, guild);
+  }
+
+  private async skipForUser(userId: string, guild: Guild): Promise<string> {
+    await this.requireVoiceChannel(userId, guild);
     const player = this.playerFor(guild.id);
     if (!player?.track) throw new MusicUserError("nothing is playing right now");
     this.suppressEnd(guild.id);
@@ -306,7 +349,11 @@ export class MusicService {
   }
 
   private async stopPlayback(interaction: ChatInputCommandInteraction, guild: Guild): Promise<string> {
-    await this.requireVoiceChannel(interaction.user.id, guild);
+    return await this.stopPlaybackForUser(interaction.user.id, guild);
+  }
+
+  private async stopPlaybackForUser(userId: string, guild: Guild): Promise<string> {
+    await this.requireVoiceChannel(userId, guild);
     const active = await this.dependencies.store.clear(guild.id);
     this.suppressEnd(guild.id);
     this.clearIdleTimer(guild.id);

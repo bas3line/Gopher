@@ -24,7 +24,7 @@ import type { Logger } from "../logger.ts";
 import { MemoryStore } from "../memory/store.ts";
 import { MusicService } from "../music/service.ts";
 import { MusicStore } from "../music/store.ts";
-import { parseMusicTextPlayRequest } from "../music/query.ts";
+import { parseMusicTextCommand, type TextMusicCommand } from "../music/query.ts";
 import { Coordinator, Semaphore } from "../infra/coordinator.ts";
 import type { WebSource } from "../types.ts";
 import { WebResearch, WebResearchError } from "../web/firecrawl.ts";
@@ -415,11 +415,11 @@ export class DiscordBot {
         return;
       }
 
-      const musicQuery = !ambient && message.guild
-        ? parseMusicTextPlayRequest(cleanContent)
+      const musicCommand = !ambient && message.guild
+        ? parseMusicTextCommand(cleanContent)
         : undefined;
-      if (musicQuery) {
-        await this.handleTextMusicPlay(message, guildId, username, musicQuery);
+      if (musicCommand) {
+        await this.handleTextMusicCommand(message, guildId, username, musicCommand);
         return;
       }
 
@@ -623,11 +623,11 @@ export class DiscordBot {
     }
   }
 
-  private async handleTextMusicPlay(
+  private async handleTextMusicCommand(
     message: Message,
     guildId: string,
     username: string,
-    query: string,
+    command: TextMusicCommand,
   ): Promise<void> {
     const guild = message.guild;
     if (!guild) return;
@@ -635,11 +635,11 @@ export class DiscordBot {
     const content = this.voiceChat.hasActiveSession(guildId)
       ? "live voice chat owns the VC right now. use `/voicechat leave` before music commands."
       : this.music
-        ? await this.music.playFromText({
+        ? await this.music.handleTextCommand({
             guild,
             userId: message.author.id,
             username,
-            query,
+            command,
           })
         : "music is unavailable right now—try again in a moment.";
     const sent = await message.reply({

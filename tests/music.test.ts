@@ -8,6 +8,7 @@ import {
   DEFAULT_MUSIC_SEARCH,
   MusicQueryError,
   musicIdentifier,
+  parseMusicTextCommand,
   parseMusicTextPlayRequest,
 } from "../src/music/query.ts";
 
@@ -50,6 +51,18 @@ describe("plain-language music requests", () => {
     );
     expect(parseMusicTextPlayRequest("why is this music so loud?")).toBeUndefined();
     expect(parseMusicTextPlayRequest("play ".repeat(200))).toBeUndefined();
+  });
+
+  test("understands casual direct playback controls before the AI answer path", () => {
+    expect(parseMusicTextCommand("stop this bro")).toEqual({ kind: "stop" });
+    expect(parseMusicTextCommand("can you pause the music please")).toEqual({ kind: "pause" });
+    expect(parseMusicTextCommand("bro play california love")).toEqual({
+      kind: "play",
+      query: "california love",
+    });
+    expect(parseMusicTextCommand("skip this song")).toEqual({ kind: "skip" });
+    expect(parseMusicTextCommand("what's playing?")).toEqual({ kind: "now" });
+    expect(parseMusicTextCommand("stop being a clown")).toBeUndefined();
   });
 });
 
