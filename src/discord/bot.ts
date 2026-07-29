@@ -61,6 +61,8 @@ import type {
   SynthesizedVoiceMessage,
   VoiceSynthesizer,
 } from "../voice/fish-audio.ts";
+import { VoiceChatService } from "../voice/chat.ts";
+import { CloudflareWhisper } from "../voice/cloudflare-whisper.ts";
 
 interface AnswerInput {
   discordMessageId: string;
@@ -91,6 +93,7 @@ export class DiscordBot {
   private readonly moderation: ServerModeration;
   private readonly semaphore: Semaphore;
   private music: MusicService | undefined;
+  private readonly voiceChat: VoiceChatService;
 
   constructor(
     private readonly dependencies: {
@@ -103,6 +106,8 @@ export class DiscordBot {
       coordinator: Coordinator;
       web: WebResearch;
       voice: VoiceSynthesizer;
+      voiceChatStt: CloudflareWhisper;
+      voiceChatVoice: VoiceSynthesizer;
       logger: Logger;
     },
   ) {
@@ -142,6 +147,29 @@ export class DiscordBot {
     } catch (error) {
       this.dependencies.logger.error({ err: error }, "failed to configure music service");
     }
+    this.voiceChat = new VoiceChatService({
+      client: this.client,
+      config: this.dependencies.config.voiceChat,
+      stt: this.dependencies.voiceChatStt,
+      synthesizer: this.dependencies.voiceChatVoice,
+      complete: async (messages) =>
+        await this.semaphore.use(async () =>
+          await this.dependencies.textAI.complete(
+            messages,
+            this.dependencies.config.text.model,
+          ),
+        ),
+      textModel: this.dependencies.config.text.model,
+      sttModel: this.dependencies.config.cloudflare.sttModel,
+      memory: this.dependencies.memory,
+      coordinator: this.dependencies.coordinator,
+      maxUserRequestsPerMinute:
+        this.dependencies.config.maxUserRequestsPerMinute,
+      releaseMusic: async (guildId) => {
+        await this.music?.releaseForVoiceChat(guildId);
+      },
+      logger: this.dependencies.logger,
+    });
   }
 
   get ready(): boolean {
@@ -227,6 +255,7 @@ export class DiscordBot {
   }
 
   async stop(): Promise<void> {
+    await this.voiceChat.stop();
     await this.music?.stop();
     this.client.destroy();
   }
@@ -453,7 +482,19 @@ export class DiscordBot {
       });
       return;
     }
+    if (interaction.commandName === "voicechat") {
+      await this.voiceChat.handle(interaction);
+      return;
+    }
     if (interaction.commandName === "music") {
+      if (interaction.guildId && this.voiceChat.hasActiveSession(interaction.guildId)) {
+        await interaction.reply({
+          content: "live voice chat owns the VC right now. use `/voicechat leave` before music commands.",
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        });
+        return;
+      }
       if (!this.music) {
         await interaction.reply({
           content: "music is unavailable right now—try again in a moment.",

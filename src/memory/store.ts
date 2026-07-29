@@ -248,7 +248,7 @@ export class MemoryStore {
     channelId: string;
     userId: string;
     model: string;
-    kind: "chat" | "vision" | "summary";
+    kind: "chat" | "vision" | "summary" | "voice_stt" | "voice_chat";
     success: boolean;
     latencyMs: number;
     promptTokens?: number;

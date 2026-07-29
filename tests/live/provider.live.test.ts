@@ -15,7 +15,7 @@ test.skipIf(!enabled)("live provider returns a final answer", async () => {
   const client = new AIClient({
     endpoint: normalizeChatCompletionsUrl(endpoint),
     apiKey,
-    maxTokens: Number(process.env.TEXT_MAX_TOKENS ?? 2_400),
+    maxTokens: Number(process.env.TEXT_MAX_TOKENS ?? 16_384),
     reasoningEffort: "none",
     logger: pino({ level: "silent" }),
     maxRetries: 1,

@@ -33,6 +33,26 @@ export const commandData = [
         .setRequired(true),
     ),
   new SlashCommandBuilder()
+    .setName("voicechat")
+    .setDescription("Admin-only live AI voice chat controls")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDMPermission(false)
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("join")
+        .setDescription("Join your voice channel for an ephemeral live chat"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("leave")
+        .setDescription("End the live voice chat and leave voice"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("status")
+        .setDescription("Show whether live voice chat is active"),
+    ),
+  new SlashCommandBuilder()
     .setName("card")
     .setDescription(
       "Turn any take, roast, or verdict into a shareable image card",
@@ -303,6 +323,6 @@ export const commandData = [
 export const aboutText =
   "**Gopher** is an AI bot—not a human—with dry group-chat energy and senior Go experience. " +
   "It remembers channel context in PostgreSQL, retrieves older relevant chat, can inspect images, " +
-  "uses Firecrawl for explicit or time-sensitive web research, can send Fish Audio voice replies, and has a persistent Lavalink music queue. " +
-  "Mention it, reply to it, use `/ask`, `/voice`, `/search`, `/card`, or `/music play`. Server administrators can use confirmed `/server` actions. It never executes " +
+  "uses Firecrawl for explicit or time-sensitive web research, can send voice replies, hosts admin-started Cloudflare live voice chat, and has a persistent Lavalink music queue. " +
+  "Mention it, reply to it, use `/ask`, `/voice`, `/search`, `/card`, `/music play`, or (for admins) `/voicechat join`. Server administrators can use confirmed `/server` actions. It never executes " +
   "pasted code, and its takes are not proof: run your tests.";

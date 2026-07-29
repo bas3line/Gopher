@@ -28,7 +28,7 @@ const configSchema = z
       .int()
       .min(256)
       .max(32_768)
-      .default(2_400),
+      .default(16_384),
     SUMMARY_MAX_TOKENS: z.coerce
       .number()
       .int()
@@ -52,6 +52,37 @@ const configSchema = z
       .string()
       .regex(/^[a-z0-9._-]+$/i)
       .default("amalthea"),
+    CLOUDFLARE_STT_MODEL: z
+      .string()
+      .regex(/^@cf\/[a-z0-9._-]+\/[a-z0-9._-]+$/i)
+      .default("@cf/openai/whisper-large-v3-turbo"),
+    VOICE_CHAT_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    VOICE_CHAT_LANGUAGE: z
+      .string()
+      .trim()
+      .regex(/^[a-z]{2,3}(?:-[a-z]{2,4})?$/i, "must be an ISO language code")
+      .default("en"),
+    VOICE_CHAT_MAX_UTTERANCE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(3)
+      .max(30)
+      .default(20),
+    VOICE_CHAT_IDLE_TIMEOUT_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(60)
+      .max(3_600)
+      .default(900),
+    VOICE_CHAT_MAX_REPLY_CHARACTERS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(2_000)
+      .default(900),
     OPENAI_BASE_URL: z.string().url(),
     OPENAI_API_KEY: z.string().min(1),
     OPENAI_VISION_MODEL: z.string().min(1),
@@ -184,6 +215,14 @@ export interface AppConfig {
     voiceFallback: boolean;
     voiceModel: string;
     voiceSpeaker: string;
+    sttModel: string;
+  };
+  voiceChat: {
+    enabled: boolean;
+    language: string;
+    maxUtteranceSeconds: number;
+    idleTimeoutSeconds: number;
+    maxReplyCharacters: number;
   };
   openAI: {
     baseUrl: string;
@@ -252,6 +291,14 @@ export function loadConfig(
       voiceFallback: value.CLOUDFLARE_VOICE_FALLBACK,
       voiceModel: value.CLOUDFLARE_VOICE_MODEL,
       voiceSpeaker: value.CLOUDFLARE_VOICE_SPEAKER,
+      sttModel: value.CLOUDFLARE_STT_MODEL,
+    },
+    voiceChat: {
+      enabled: value.VOICE_CHAT_ENABLED,
+      language: value.VOICE_CHAT_LANGUAGE.toLowerCase(),
+      maxUtteranceSeconds: value.VOICE_CHAT_MAX_UTTERANCE_SECONDS,
+      idleTimeoutSeconds: value.VOICE_CHAT_IDLE_TIMEOUT_SECONDS,
+      maxReplyCharacters: value.VOICE_CHAT_MAX_REPLY_CHARACTERS,
     },
     openAI: {
       baseUrl: normalizeChatCompletionsUrl(value.OPENAI_BASE_URL),

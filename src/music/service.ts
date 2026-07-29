@@ -92,6 +92,51 @@ export class MusicService {
     this.boundPlayers.clear();
   }
 
+  /**
+   * Releases Lavalink ownership before a live voice-chat session joins.
+   * The current track is marked skipped, while upcoming tracks remain queued
+   * so a later `/music play` can continue normally.
+   */
+  async releaseForVoiceChat(guildId: string): Promise<void> {
+    if (!this.shoukaku) return;
+    const released = await this.dependencies.coordinator.withMusicLock(
+      guildId,
+      async () => {
+        this.clearIdleTimer(guildId);
+        const player = this.playerFor(guildId);
+        const current = (await this.dependencies.store.snapshot(guildId)).current;
+        if (player?.track) {
+          this.suppressEnd(guildId);
+          try {
+            await player.stopTrack();
+          } catch (error) {
+            this.dependencies.logger.warn(
+              { err: error, guildId },
+              "could not stop music before handing voice to live chat",
+            );
+          }
+        }
+        if (current) {
+          await this.dependencies.store.finishCurrent(guildId, "skipped");
+        }
+
+        await this.shoukaku!.leaveVoiceChannel(guildId);
+        this.boundPlayers.delete(guildId);
+        if (player || current) {
+          this.dependencies.logger.info(
+            { guildId },
+            "released Lavalink voice ownership for live chat",
+          );
+        }
+        return true;
+      },
+      10_000,
+    );
+    if (released === undefined) {
+      throw new Error("could not acquire music lock for live voice chat");
+    }
+  }
+
   async handle(interaction: ChatInputCommandInteraction): Promise<void> {
     if (!this.shoukaku) {
       await interaction.reply({

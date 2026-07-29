@@ -9,6 +9,10 @@ const migrations = [
     version: "002_music",
     path: new URL("./migrations/002_music.sql", import.meta.url),
   },
+  {
+    version: "003_voice_chat",
+    path: new URL("./migrations/003_voice_chat.sql", import.meta.url),
+  },
 ] as const;
 
 export async function migrate(pool: DatabasePool): Promise<void> {

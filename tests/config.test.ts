@@ -37,13 +37,21 @@ describe("configuration", () => {
       "https://text-provider.example/openai/v1/chat/completions",
     );
     expect(config.text.model).toBe("FW-GLM-5.2");
-    expect(config.text.maxTokens).toBe(2_400);
+    expect(config.text.maxTokens).toBe(16_384);
     expect(config.text.summaryMaxTokens).toBe(16_384);
     expect(config.text.reasoningEffort).toBe("none");
     expect(config.ownerUserIds).toEqual([]);
     expect(config.cloudflare.voiceFallback).toBeTrue();
     expect(config.cloudflare.voiceModel).toBe("@cf/deepgram/aura-2-en");
     expect(config.cloudflare.voiceSpeaker).toBe("amalthea");
+    expect(config.cloudflare.sttModel).toBe("@cf/openai/whisper-large-v3-turbo");
+    expect(config.voiceChat).toEqual({
+      enabled: false,
+      language: "en",
+      maxUtteranceSeconds: 20,
+      idleTimeoutSeconds: 900,
+      maxReplyCharacters: 900,
+    });
     expect(config.fishAudio.referenceId).toBe(
       "ca3007f96ae7499ab87d27ea3599956a",
     );
@@ -121,5 +129,22 @@ describe("configuration", () => {
         MUSIC_DEFAULT_VOLUME: "80",
       }).music,
     ).toMatchObject({ enabled: true, defaultVolume: 80 });
+  });
+
+  test("bounds live voice-chat configuration", () => {
+    expect(() =>
+      loadConfig({
+        ...requiredEnvironment,
+        VOICE_CHAT_MAX_UTTERANCE_SECONDS: "31",
+      }),
+    ).toThrow();
+    expect(
+      loadConfig({
+        ...requiredEnvironment,
+        VOICE_CHAT_ENABLED: "true",
+        VOICE_CHAT_LANGUAGE: "hi",
+        VOICE_CHAT_MAX_REPLY_CHARACTERS: "1200",
+      }).voiceChat,
+    ).toMatchObject({ enabled: true, language: "hi", maxReplyCharacters: 1200 });
   });
 });

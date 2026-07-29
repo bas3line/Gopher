@@ -9,6 +9,7 @@ import { createLogger } from "./logger.ts";
 import { MemoryStore } from "./memory/store.ts";
 import { MusicStore } from "./music/store.ts";
 import { CloudflareAuraVoice } from "./voice/cloudflare-aura.ts";
+import { CloudflareWhisper } from "./voice/cloudflare-whisper.ts";
 import { FallbackVoice } from "./voice/fallback.ts";
 import { FishAudioVoice } from "./voice/fish-audio.ts";
 import { WebResearch } from "./web/firecrawl.ts";
@@ -65,6 +66,23 @@ const cloudflareVoice = new CloudflareAuraVoice({
   enabled: config.cloudflare.voiceFallback,
   logger,
 });
+const voiceChatStt = new CloudflareWhisper({
+  accountId: config.cloudflare.accountId,
+  apiToken: config.cloudflare.apiToken,
+  model: config.cloudflare.sttModel,
+  language: config.voiceChat.language,
+  enabled: config.voiceChat.enabled,
+  logger,
+});
+const voiceChatVoice = new CloudflareAuraVoice({
+  accountId: config.cloudflare.accountId,
+  apiToken: config.cloudflare.apiToken,
+  model: config.cloudflare.voiceModel,
+  speaker: config.cloudflare.voiceSpeaker,
+  maxCharacters: config.voiceChat.maxReplyCharacters,
+  enabled: config.voiceChat.enabled,
+  logger,
+});
 const voice = new FallbackVoice({
   primary: fishVoice,
   fallback: cloudflareVoice,
@@ -82,6 +100,8 @@ const bot = new DiscordBot({
   coordinator,
   web,
   voice,
+  voiceChatStt,
+  voiceChatVoice,
   logger,
 });
 

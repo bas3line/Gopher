@@ -18,6 +18,7 @@ make moderation decisions on its own.
 - **PostgreSQL** for chat memory, lexical retrieval, durable summaries, and cached research.
 - **Redis** for deduplication, rate limits, locks, and one-shot moderation confirmations.
 - **Firecrawl** for opt-in web research, plus Fish Audio and Cloudflare Aura-2 for voice replies.
+- **Cloudflare Whisper Turbo + Aura-2** for opt-in, administrator-started live voice conversations. Audio, transcripts, and the short call context stay ephemeral.
 - **Lavalink** for durable, per-server voice playback and YouTube search—inside Compose, never as a shell-out downloader.
 - **Docker Compose** to run the bot, PostgreSQL, Redis, and optional music node together.
 
@@ -45,6 +46,13 @@ Open `.env` and set:
 
 Vision, web research, and voice are optional. Add their keys only if you want those features.
 Never commit `.env`.
+
+For live voice chat, Cloudflare credentials are required. Set `VOICE_CHAT_ENABLED=true`; then a server
+administrator can join a VC and run `/voicechat join`. The bot uses Cloudflare Whisper Large v3 Turbo
+for speech-to-text and Aura-2 for speech, while its normal text model handles the conversation. Set
+`VOICE_CHAT_LANGUAGE` if your server primarily speaks another supported language. Sessions time out after
+15 minutes by default, never start merely because someone joins a channel, and can be stopped with
+`/voicechat leave`.
 
 To enable music, set `MUSIC_ENABLED=true`, generate a unique `LAVALINK_PASSWORD`, and start the
 music profile too. Lavalink stays on the internal Docker network; do not publish port `2333`.
@@ -77,6 +85,11 @@ Use `/music play <song or URL>` after joining voice. Gopher persists queues and 
 `/music queue`, `/music now`, `/music pause`, `/music resume`, `/music skip`, `/music remove`,
 `/music shuffle`, `/music volume`, `/music seek`, `/music history`, and `/music stop` cover the rest.
 Music history is capped at the latest 100 completed tracks per server.
+
+`/voicechat join`, `/voicechat leave`, and `/voicechat status` are server-only administrator controls.
+Voice chat takes ownership of the channel while active, so end it before issuing music commands. It does
+not save raw audio, Whisper transcripts, or in-call context to PostgreSQL; it records only anonymous
+model success/latency accounting.
 
 `/server` moderation commands need extra Discord permissions and always require an administrator's
 explicit, expiring confirmation. The model never executes moderation actions.

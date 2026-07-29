@@ -8,6 +8,7 @@ describe("slash commands", () => {
       "ask",
       "search",
       "voice",
+      "voicechat",
       "card",
       "memory",
       "about",
@@ -33,6 +34,17 @@ describe("slash commands", () => {
       "volume",
       "seek",
       "stop",
+    ]);
+  });
+
+  test("restricts live voice chat controls to server administrators", () => {
+    const voiceChat = commandData.find((command) => command.name === "voicechat");
+    expect(voiceChat?.dm_permission).toBeFalse();
+    expect(voiceChat?.default_member_permissions).toBe("8");
+    expect(voiceChat?.options?.map((option) => option.name)).toEqual([
+      "join",
+      "leave",
+      "status",
     ]);
   });
 });
