@@ -1,0 +1,35 @@
+{
+  "name": "go-senior-discord-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "migrate": "bun src/db/migrate.ts",
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "test:integration": "RUN_INTEGRATION_TESTS=1 bun test tests/integration",
+    "smoke:provider": "RUN_LIVE_PROVIDER_TEST=1 bun test tests/live/provider.live.test.ts",
+    "smoke:firecrawl": "RUN_LIVE_FIRECRAWL_TEST=1 bun test tests/live/firecrawl.live.test.ts",
+    "smoke:voice": "RUN_LIVE_VOICE_TEST=1 bun test tests/live/voice.live.test.ts",
+    "smoke:voice-fallback": "RUN_LIVE_CLOUDFLARE_VOICE_TEST=1 bun test tests/live/cloudflare-voice.live.test.ts"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "firecrawl": "^4.31.1",
+    "ioredis": "^5.11.1",
+    "pg": "^8.22.0",
+    "pino": "^10.3.1",
+    "sharp": "^0.35.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/pg": "^8.20.0",
+    "typescript": "^7.0.2"
+  }
+}

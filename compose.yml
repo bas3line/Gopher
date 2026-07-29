@@ -1,0 +1,79 @@
+name: go-senior-discord-bot
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-go_senior_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-go_senior_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - ${BOT_DATA_ROOT:-/data/go-senior-discord-bot}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [bot-internal]
+    security_opt: [no-new-privileges:true]
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - ${BOT_DATA_ROOT:-/data/go-senior-discord-bot}/redis:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [bot-internal]
+    security_opt: [no-new-privileges:true]
+
+  bot:
+    profiles: [bot]
+    build:
+      context: .
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-go_senior_bot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-go_senior_bot}
+      REDIS_URL: redis://redis:6379/0
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - fetch("http://127.0.0.1:3000/healthz").then(async r=>{if(!r.ok)throw new Error(await r.text())})
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 45s
+    networks: [bot-internal, bot-egress]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+networks:
+  bot-internal:
+    internal: true
+  bot-egress:
