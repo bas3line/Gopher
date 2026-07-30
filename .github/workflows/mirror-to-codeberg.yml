@@ -1,0 +1,46 @@
+name: Mirror to Codeberg
+
+on:
+  push:
+  delete:
+  workflow_dispatch:
+  schedule:
+    - cron: "37 */6 * * *"
+
+concurrency:
+  group: codeberg-mirror
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    name: Push Git refs to Codeberg
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Configure Codeberg SSH access
+        env:
+          CODEBERG_SSH_PRIVATE_KEY: ${{ secrets.CODEBERG_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${CODEBERG_SSH_PRIVATE_KEY:-}"
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$CODEBERG_SSH_PRIVATE_KEY" > "$HOME/.ssh/codeberg_mirror"
+          chmod 600 "$HOME/.ssh/codeberg_mirror"
+          printf '%s\n' \
+            'codeberg.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIVIC02vnjFyL+I4RHfvIGNtOgJMe769VTF1VR4EB3ZB' \
+            > "$HOME/.ssh/known_hosts"
+
+      - name: Mirror all branches and tags
+        env:
+          GIT_SSH_COMMAND: >-
+            ssh -i ~/.ssh/codeberg_mirror
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+        run: |
+          set -euo pipefail
+          git clone --mirror "https://github.com/${GITHUB_REPOSITORY}.git" repository.git
+          git -C repository.git push --mirror git@codeberg.org:bas3line/Gopher.git
