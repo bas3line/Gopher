@@ -19,6 +19,16 @@ export interface DiscordChannelSnapshot {
   parentId?: string;
 }
 
+export interface DiscordThreadSnapshot {
+  id: string;
+  name: string;
+  parentId?: string;
+  ownerId?: string;
+  archived: boolean;
+  locked: boolean;
+  messageCount?: number;
+}
+
 export interface DiscordMemberSnapshot {
   id: string;
   username: string;
@@ -35,10 +45,17 @@ export interface DiscordAgentAdapter {
     limit: number;
     query?: string;
   }): Promise<DiscordMessageSnapshot[]>;
+  getMessage(input: {
+    messageId: string;
+  }): Promise<DiscordMessageSnapshot>;
   listChannels(input: {
     query?: string;
     limit: number;
   }): Promise<DiscordChannelSnapshot[]>;
+  listThreads(input: {
+    query?: string;
+    limit: number;
+  }): Promise<DiscordThreadSnapshot[]>;
   findMember(input: {
     userId?: string;
     query?: string;
@@ -47,9 +64,27 @@ export interface DiscordAgentAdapter {
     messageId: string;
     emoji: string;
   }>;
-  sendMessage(input: { channelId?: string; content: string }): Promise<{
+  removeOwnReaction(input: { messageId: string; emoji: string }): Promise<{
+    messageId: string;
+    emoji: string;
+    removed: boolean;
+  }>;
+  sendMessage(input: {
+    channelId?: string;
+    content: string;
+    nonce: string;
+  }): Promise<{
     messageId: string;
     channelId: string;
+  }>;
+  replyToMessage(input: {
+    messageId: string;
+    content: string;
+    nonce: string;
+  }): Promise<{
+    messageId: string;
+    channelId: string;
+    replyToMessageId: string;
   }>;
   createThread(input: {
     messageId?: string;
@@ -65,6 +100,18 @@ export interface DiscordAgentAdapter {
   pinMessage(input: {
     messageId: string;
   }): Promise<{ messageId: string }>;
+  unpinMessage(input: {
+    messageId: string;
+  }): Promise<{ messageId: string }>;
+  editThread(input: {
+    threadId?: string;
+    name?: string;
+    archived?: boolean;
+  }): Promise<{
+    threadId: string;
+    name: string;
+    archived: boolean;
+  }>;
 }
 
 export interface AgentRequestContext {
@@ -85,6 +132,9 @@ export interface AgentRequestContext {
     | "forgetMemory"
     | "saveWebSources"
     | "recordDiscordEvent"
+    | "claimAgentAction"
+    | "completeAgentAction"
+    | "failAgentAction"
   >;
   web: Pick<WebResearch, "enabled" | "search">;
   discord?: DiscordAgentAdapter;

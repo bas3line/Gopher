@@ -46,7 +46,21 @@ function fakeDiscord(
     async readMessages() {
       return [];
     },
+    async getMessage(input) {
+      return {
+        id: input.messageId,
+        channelId: "channel",
+        authorId: "user",
+        username: "Kira",
+        content: "hello",
+        createdAt: "2026-07-31T00:00:00.000Z",
+        attachmentUrls: [],
+      };
+    },
     async listChannels() {
+      return [];
+    },
+    async listThreads() {
       return [];
     },
     async findMember() {
@@ -55,8 +69,18 @@ function fakeDiscord(
     async react(input) {
       return input;
     },
+    async removeOwnReaction(input) {
+      return { ...input, removed: true };
+    },
     async sendMessage() {
       return { messageId: "sent", channelId: "channel" };
+    },
+    async replyToMessage(input) {
+      return {
+        messageId: "reply",
+        channelId: "channel",
+        replyToMessageId: input.messageId,
+      };
     },
     async createThread(input) {
       return { threadId: "thread", name: input.name };
@@ -69,6 +93,16 @@ function fakeDiscord(
     },
     async pinMessage(input) {
       return { messageId: input.messageId };
+    },
+    async unpinMessage(input) {
+      return { messageId: input.messageId };
+    },
+    async editThread(input) {
+      return {
+        threadId: input.threadId ?? "thread",
+        name: input.name ?? "thread",
+        archived: input.archived ?? false,
+      };
     },
     ...overrides,
   };
@@ -102,6 +136,11 @@ function fakeContext(
       async recordDiscordEvent() {
         return true;
       },
+      async claimAgentAction() {
+        return { status: "execute" };
+      },
+      async completeAgentAction() {},
+      async failAgentAction() {},
     },
     web: {
       enabled: true,
@@ -169,6 +208,18 @@ describe("agent tool policy and capabilities", () => {
     expect(
       hasExplicitDiscordWriteIntent("we were discussing reactions", "react"),
     ).toBeFalse();
+    expect(
+      hasExplicitDiscordWriteIntent(
+        "reply to that message with the release link",
+        "reply",
+      ),
+    ).toBeTrue();
+    expect(
+      hasExplicitDiscordWriteIntent("archive this thread", "thread_edit"),
+    ).toBeTrue();
+    expect(
+      hasExplicitDiscordWriteIntent("unpin that message", "unpin"),
+    ).toBeTrue();
   });
 
   test("writes user memory only from an explicit request with current evidence", async () => {
@@ -336,5 +387,109 @@ describe("agent tool policy and capabilities", () => {
         "explicit_action_required",
       );
     }
+  });
+
+  test("supports explicit reply, reaction removal, thread edit, and unpin actions", async () => {
+    const calls: string[] = [];
+    const discord = fakeDiscord({
+      async replyToMessage(input) {
+        calls.push(`reply:${input.messageId}:${input.nonce.length}`);
+        return {
+          messageId: "reply",
+          channelId: "channel",
+          replyToMessageId: input.messageId,
+        };
+      },
+      async removeOwnReaction(input) {
+        calls.push(`unreact:${input.emoji}`);
+        return { ...input, removed: true };
+      },
+      async editThread(input) {
+        calls.push(`thread:${input.archived}`);
+        return {
+          threadId: input.threadId ?? "thread",
+          name: input.name ?? "existing",
+          archived: input.archived ?? false,
+        };
+      },
+      async unpinMessage(input) {
+        calls.push(`unpin:${input.messageId}`);
+        return { messageId: input.messageId };
+      },
+    });
+
+    await execute(
+      findTool("discord_reply_to_message"),
+      { messageId: "target", content: "shipped" },
+      fakeContext({
+        requestText: "reply to that message with shipped",
+        discord,
+      }),
+    );
+    await execute(
+      findTool("discord_remove_own_reaction"),
+      { messageId: "target", emoji: "🔥" },
+      fakeContext({
+        requestText: "remove your reaction from that message",
+        discord,
+      }),
+    );
+    await execute(
+      findTool("discord_edit_thread"),
+      { threadId: "thread", archived: true },
+      fakeContext({
+        requestText: "archive this thread",
+        discord,
+      }),
+    );
+    await execute(
+      findTool("discord_unpin_message"),
+      { messageId: "target" },
+      fakeContext({
+        requestText: "unpin that message",
+        isAdministrator: true,
+        discord,
+      }),
+    );
+
+    expect(calls).toEqual([
+      "reply:target:25",
+      "unreact:🔥",
+      "thread:true",
+      "unpin:target",
+    ]);
+  });
+
+  test("replays a completed durable action receipt without calling Discord again", async () => {
+    let sends = 0;
+    const base = fakeContext();
+    const result = await execute(
+      findTool("discord_send_message"),
+      { content: "hello" },
+      fakeContext({
+        requestText: "send this message in the current channel",
+        discord: fakeDiscord({
+          async sendMessage() {
+            sends += 1;
+            return { messageId: "unexpected", channelId: "channel" };
+          },
+        }),
+        memory: {
+          ...base.memory,
+          async claimAgentAction() {
+            return {
+              status: "completed",
+              result: { messageId: "already-sent", channelId: "channel" },
+            };
+          },
+        },
+      }),
+    );
+    expect(sends).toBe(0);
+    expect(result).toEqual({
+      messageId: "already-sent",
+      channelId: "channel",
+      idempotentReplay: true,
+    });
   });
 });

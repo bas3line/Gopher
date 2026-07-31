@@ -18,7 +18,7 @@ import {
   type ThreadChannel,
   type User,
 } from "discord.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.ts";
 import {
   AIProviderError,
@@ -492,11 +492,6 @@ export class DiscordBot {
     if (message.author.bot || message.webhookId || !this.client.user) return;
 
     try {
-      const firstSeen = await this.dependencies.coordinator.markMessageSeen(
-        message.id,
-      );
-      if (!firstSeen) return;
-
       const guildId = message.guildId ?? `dm:${message.author.id}`;
       const username =
         message.member?.displayName ??
@@ -534,6 +529,10 @@ export class DiscordBot {
           : {}),
         createdAt: message.createdAt,
       });
+      const firstSeen = await this.dependencies.coordinator.markMessageSeen(
+        message.id,
+      );
+      if (!firstSeen) return;
 
       if (message.guildId && shouldReactWithTuff(cleanContent)) {
         await message.react(tuffEmoji).catch((error) => {
@@ -849,6 +848,7 @@ export class DiscordBot {
           `**memory status**\n` +
           `typed memories: ${overview.total} (${overview.user} yours, ${overview.channel} channel, ${overview.guild} server)\n` +
           `pending consolidation jobs: ${overview.pendingIngestion}\n` +
+          `pending semantic embedding jobs: ${overview.pendingEmbedding}\n` +
           `rolling channel summary: ${summary ? `updated ${summary.updatedAt.toISOString()}` : "not built yet"}\n\n` +
           (summary
             ? summary.summary.slice(0, 1_350)
@@ -1213,13 +1213,25 @@ export class DiscordBot {
         };
         const agent = new AgentLoop({
           client: {
-            complete: async (messages, selectedModel) =>
+            complete: async (messages, selectedModel, signal) =>
               await this.semaphore.use(() =>
-                textAI.complete(messages, selectedModel),
+                textAI.complete(messages, selectedModel, signal),
+                signal,
               ),
-            completeToolTurn: async (messages, selectedModel, tools) =>
+            completeToolTurn: async (
+              messages,
+              selectedModel,
+              tools,
+              signal,
+            ) =>
               await this.semaphore.use(() =>
-                textAI.completeToolTurn(messages, selectedModel, tools),
+                textAI.completeToolTurn(
+                  messages,
+                  selectedModel,
+                  tools,
+                  signal,
+                ),
+                signal,
               ),
           },
           model,
@@ -1554,6 +1566,8 @@ export class DiscordBot {
           files: [this.voiceAttachment(answer.voice)],
           flags: MessageFlags.IsVoiceMessage,
           allowedMentions: { parse: [], repliedUser: false },
+          nonce: discordNonce("answer", message.id, 0),
+          enforceNonce: true,
         });
         if (
           (answer.voice.needsTextFollowUp ||
@@ -1561,7 +1575,11 @@ export class DiscordBot {
             answer.card) &&
           message.channel.isSendable()
         ) {
-          await this.sendTextFollowUps(message.channel, answer).catch(
+          await this.sendTextFollowUps(
+            message.channel,
+            answer,
+            message.id,
+          ).catch(
             (error) => {
               this.dependencies.logger.warn(
                 { err: error, messageId: message.id },
@@ -1589,6 +1607,8 @@ export class DiscordBot {
       content: chunks[0] ?? "got nothing",
       allowedMentions: { parse: [], repliedUser: false },
       flags: MessageFlags.SuppressEmbeds,
+      nonce: discordNonce("answer", message.id, 0),
+      enforceNonce: true,
       ...(answer.card
         ? {
             files: [
@@ -1600,11 +1620,13 @@ export class DiscordBot {
         : {}),
     });
     if (message.channel.isSendable()) {
-      for (const chunk of chunks.slice(1)) {
+      for (const [index, chunk] of chunks.slice(1).entries()) {
         await message.channel.send({
           content: chunk,
           allowedMentions: { parse: [] },
           flags: MessageFlags.SuppressEmbeds,
+          nonce: discordNonce("answer", message.id, index + 1),
+          enforceNonce: true,
         });
       }
     }
@@ -1720,6 +1742,7 @@ export class DiscordBot {
   private async sendTextFollowUps(
     channel: Extract<Message["channel"], { send: unknown }>,
     answer: AnswerOutput,
+    nonceSeed: string,
   ): Promise<void> {
     const chunks = splitDiscordMessage(answer.text);
     for (const [index, chunk] of chunks.entries()) {
@@ -1727,6 +1750,8 @@ export class DiscordBot {
         content: chunk,
         allowedMentions: { parse: [] },
         flags: MessageFlags.SuppressEmbeds,
+        nonce: discordNonce("voice-followup", nonceSeed, index),
+        enforceNonce: true,
         ...(index === 0 && answer.card
           ? {
               files: [
@@ -1793,4 +1818,15 @@ export class DiscordBot {
     }
     return "something broke, tragic";
   }
+}
+
+function discordNonce(
+  purpose: string,
+  sourceId: string,
+  index: number,
+): string {
+  return createHash("sha256")
+    .update(`${purpose}:${sourceId}:${index}`)
+    .digest("hex")
+    .slice(0, 25);
 }

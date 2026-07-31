@@ -47,4 +47,25 @@ describe("slash commands", () => {
       "status",
     ]);
   });
+
+  test("publishes explicit long-term memory controls", () => {
+    const memory = commandData.find((command) => command.name === "memory");
+    expect(memory?.options?.map((option) => option.name)).toEqual([
+      "status",
+      "search",
+      "remember",
+      "forget",
+    ]);
+    const remember = memory?.options?.find(
+      (option) => option.name === "remember",
+    );
+    const rememberOptions =
+      remember && "options" in remember ? remember.options : undefined;
+    expect(rememberOptions?.map((option) => option.name)).toEqual([
+      "key",
+      "content",
+      "kind",
+      "scope",
+    ]);
+  });
 });

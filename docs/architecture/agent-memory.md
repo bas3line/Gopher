@@ -47,10 +47,12 @@ use the agent runtime by default.
 | Message journal | `chat_messages`, `chat_message_revisions` | Exact conversational evidence and edit history | Insert once; edits create revisions |
 | Working memory | Recent message query | Resolve immediate references without stale-topic contamination | Bounded read |
 | Channel summary | `conversation_summaries` | Compress longer channel continuity | Monotonic checkpointed update |
-| Durable memory | `memory_items` | Typed profile, preference, fact, decision, project, relationship, commitment, event, skill, correction | Stable-key upsert |
-| Memory history | `memory_item_revisions`, `memory_links` | Preserve corrections and relationships between memories | Append revisions; typed edges |
+| Durable memory | `memory_items` | Typed profile, preference, fact, decision, project, relationship, commitment, event, skill, correction plus optional semantic vector | Stable-key upsert |
+| Memory graph/history | `memory_item_revisions`, `memory_links`, `memory_link_revisions` | Preserve corrections and grounded relationships between memories | Append revisions; evidence-backed typed edges |
 | Research cache | `web_documents` | Retain source material used by web research | URL-keyed refresh |
 | Ingestion outbox | `memory_ingestion_jobs`, `memory_channel_checkpoints` | Crash-safe asynchronous consolidation | Claim with `SKIP LOCKED`, retry/backoff |
+| Embedding outbox | `memory_embedding_jobs` | Backfill and refresh vectors after memory revision or embedding-model change | Batched claim, version check, lease recovery |
+| Action receipts | `agent_action_receipts` | Suppress duplicate Discord side effects across model retries and process runs | Request/tool/argument hash with lease and durable result |
 
 ### Typed-memory scopes
 
@@ -74,22 +76,42 @@ Each memory has a stable key such as `preference.runtime` or
   excludes it.
 - Evidence is stored as Discord message IDs, so a recalled statement can be traced back to source
   conversation.
+- Editing an evidence message supersedes memories derived from its previous text. Deleting evidence
+  removes it from normal history/retrieval, revokes memories that depended on it, resets the rolling
+  summary, and schedules the channel for consolidation again. The raw journal and revision audit
+  remain retained according to the deployment's data-retention policy.
 
 ### Retrieval
 
-The current implementation combines:
+The current implementation performs reciprocal lexical and semantic candidate generation, followed
+by one deterministic reranker. It combines:
 
+- 1024-dimensional OpenAI-compatible embeddings;
+- pgvector HNSW cosine-neighbor search with iterative filtered scans;
 - PostgreSQL full-text rank;
 - trigram similarity over content and stable keys;
 - explicit importance and confidence;
 - pinned-memory boost;
 - recency decay;
 - access-frequency reinforcement;
+- one evidence-backed graph hop from the strongest lexical/semantic seeds;
 - deterministic scope and expiry filters.
+
+Graph expansion supports directed `supports`, `contradicts`, `updates`, `part_of`, `caused_by`, and
+`related_to` edges. Both endpoints must resolve to exact active memory identities. Neighbors pass the
+same guild, channel, user, kind, expiry, and status filters as primary candidates, so an edge cannot
+cross a visibility boundary. The model receives the seed ID, direction, relation, and confidence,
+not an unexplained score boost.
 
 The context assembler retrieves a diverse durable set plus outstanding commitments/projects.
 The model can call `memory_search` again with a more focused query when the preloaded context is not
 enough. Corrections in the current user message always outrank recalled memory.
+
+Semantic recall is optional at runtime. Configure `EMBEDDING_API_URL`, `EMBEDDING_API_KEY`, and
+`EMBEDDING_MODEL` together to enable it. Existing and revised memories are embedded asynchronously
+in batches; changing the configured model makes completed jobs eligible for refresh. If the
+embedding provider fails, recall falls back to lexical retrieval instead of making the bot amnesic.
+The supplied Compose stack uses pgvector 0.8.5 on PostgreSQL 17.
 
 ## Consolidation lifecycle
 
@@ -101,16 +123,25 @@ The background worker:
 3. Supplies the transcript, known user IDs, and existing relevant keys to the memory model.
 4. Validates strict JSON output with Zod.
 5. Rejects unknown users, invented evidence IDs, malformed keys, and credential material.
-6. Upserts accepted memories transactionally.
+6. Upserts accepted memories transactionally, then resolves and upserts grounded typed relations.
 7. Advances the checkpoint and completes every obsolete job covered by it.
 8. Retries transient failures with bounded exponential backoff; stale processing leases are
    reclaimable.
 
 Raw messages remain available even when extraction fails, so consolidation can catch up later.
 
+The independent embedding worker:
+
+1. Claims eligible `memory_embedding_jobs` with `FOR UPDATE SKIP LOCKED`.
+2. Embeds typed key/kind/content in one provider batch.
+3. Writes a vector only if the memory version is still current and active.
+4. Requeues a raced revision instead of attaching a stale vector.
+5. Refreshes vectors when the configured embedding model changes.
+6. Retries transient failures with durable exponential backoff.
+
 ## Agent loop
 
-The loop has six hard controls:
+The loop has seven hard controls:
 
 1. Maximum model iterations.
 2. Maximum total tool calls.
@@ -118,10 +149,18 @@ The loop has six hard controls:
 4. Per-tool timeout.
 5. Whole-run timeout.
 6. Maximum repeated identical call count.
+7. A write barrier that preserves model call order while parallelizing adjacent safe reads.
 
 Each assistant tool-call message and every tool result is preserved in the next model input. Read
-tools marked parallel-safe execute concurrently. Writes execute in order. An identical successful
-write is served from the run-local idempotency cache rather than executed twice.
+tools marked parallel-safe execute concurrently. Writes execute in order. Both model calls and tool
+calls are raced against hard deadlines, so a provider or tool that ignores `AbortSignal` cannot
+hold the loop forever. Observer/telemetry failures are logged without breaking a successful run.
+
+An identical successful write is served from the run-local cache. Discord side effects also claim a
+durable receipt keyed by the triggering Discord message, tool name, and canonical argument hash.
+Message sends/replies use Discord's enforced nonce so a retry returns the recent existing message
+instead of creating a duplicate. Thread creation reuses the one thread associated with its starter
+message. Reactions, edits, pins, and unpins are naturally idempotent at Discord's resource boundary.
 
 Unknown tools, malformed JSON, schema violations, denied permissions, and tool failures become
 structured tool results; they do not crash the entire process. Repeated-call and budget exhaustion
@@ -134,7 +173,9 @@ fail closed.
 - `memory_search`
 - `web_search` through Firecrawl search plus scraped main content
 - `discord_read_messages`
+- `discord_get_message`
 - `discord_list_channels`
+- `discord_list_threads`
 - `discord_get_member`
 
 ### Write tools
@@ -142,11 +183,15 @@ fail closed.
 - `memory_remember`
 - `memory_forget`
 - `discord_react`
+- `discord_remove_own_reaction`
 - `discord_send_message`
+- `discord_reply_to_message`
 - `discord_create_thread`
+- `discord_edit_thread`
 - `discord_edit_own_message`
 - `discord_delete_own_message`
 - `discord_pin_message`
+- `discord_unpin_message`
 
 Moderation remains outside the model tool layer. Ban, kick, timeout, role, and channel
 administration continue through typed Discord inputs or deterministic natural-language parsing,
@@ -167,8 +212,12 @@ Model intent is never authorization. A Discord write runs only when all of these
 6. Tool-specific ownership rules pass:
    - edits/deletes target only bot-authored messages;
    - pinning requires owner/administrator plus `Manage Messages`;
+   - unpinning has the same administrator and `Manage Messages` boundary;
+   - thread changes require the requester and bot to own or manage the thread;
    - DM tools cannot escape the current DM;
    - cross-channel sends require both requester and bot access.
+7. A durable action receipt is claimed before the external write. A completed receipt is replayed
+   as data instead of executing the write again.
 
 Web pages, recalled memories, summaries, and tool output cannot authorize writes.
 
@@ -189,6 +238,8 @@ Web pages, recalled memories, summaries, and tool output cannot authorize writes
   and latency boundary.
 - `agent_tool_calls`: call ID, iteration, effect, success, idempotency-cache hit, duration, safe
   output preview, and error code.
+- `agent_action_receipts`: durable side-effect identity, attempts, lease, final result, and failure
+  code.
 - `ai_events`: chat, vision, summary, voice, agent, and memory-extraction success/latency/token
   accounting.
 - `discord_events`: durable audit of model-independent and agent-driven Discord activity.
@@ -200,7 +251,13 @@ Web pages, recalled memories, summaries, and tool output cannot authorize writes
 - Tool denial: returned to the model with a stable safe error code.
 - Process crash during consolidation: stale lease becomes claimable after five minutes.
 - Duplicate gateway event: Redis deduplication plus database unique keys.
-- Duplicate model write: run-local write cache plus durable event idempotency key.
+- Duplicate model write: run-local cache, durable action receipt, and Discord enforced nonce where
+  supported.
+- Embedding provider failure: lexical recall remains available; the embedding job backs off and is
+  retried.
+- Memory changed during embedding: version guard rejects the stale vector and requeues the job.
+- Evidence edited/deleted: derived active memories and relationship evidence are revision-audited
+  and revoked before the channel is reconsolidated.
 - Summary failure: raw messages and typed-memory ingestion continue independently.
 
 ## Operational limits and non-claims
@@ -210,3 +267,7 @@ omniscient, or literally AGI. Memory remains evidence-driven and fallible. A loc
 behavior, not provider compatibility or live Discord permissions. Production acceptance still
 requires live provider tool-calling, Firecrawl, Discord action, and deployment checks with the
 configured accounts.
+
+An in-flight agent answer is not yet resumed after a full process crash; durable action receipts
+prevent most duplicate external writes, but the interrupted final response may need to be retried by
+the user. This is a known reliability boundary rather than an AGI claim.

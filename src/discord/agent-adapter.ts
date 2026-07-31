@@ -7,6 +7,7 @@ import {
   type GuildMember,
   type Message,
   type TextBasedChannel,
+  type ThreadChannel,
 } from "discord.js";
 import { AgentToolError } from "../agent/loop.ts";
 import type {
@@ -14,6 +15,7 @@ import type {
   DiscordChannelSnapshot,
   DiscordMemberSnapshot,
   DiscordMessageSnapshot,
+  DiscordThreadSnapshot,
 } from "../agent/context.ts";
 
 export class DiscordJsAgentAdapter implements DiscordAgentAdapter {
@@ -54,6 +56,17 @@ export class DiscordJsAgentAdapter implements DiscordAgentAdapter {
       .map(messageSnapshot);
   }
 
+  async getMessage(input: {
+    messageId: string;
+  }): Promise<DiscordMessageSnapshot> {
+    return messageSnapshot(
+      await this.fetchMessage(
+        input.messageId,
+        PermissionFlagsBits.ReadMessageHistory,
+      ),
+    );
+  }
+
   async listChannels(input: {
     query?: string;
     limit: number;
@@ -89,6 +102,37 @@ export class DiscordJsAgentAdapter implements DiscordAgentAdapter {
         type: ChannelType[channel!.type] ?? String(channel!.type),
         ...(channel!.parentId ? { parentId: channel!.parentId } : {}),
       }));
+  }
+
+  async listThreads(input: {
+    query?: string;
+    limit: number;
+  }): Promise<DiscordThreadSnapshot[]> {
+    const guild = await this.fetchGuild();
+    if (!guild) {
+      throw new AgentToolError(
+        "guild_required",
+        "Thread listing is only available inside a server",
+      );
+    }
+    const requester = await guild.members.fetch(this.dependencies.requesterUserId);
+    const bot = await this.fetchBotMember(guild);
+    const query = input.query?.trim().toLocaleLowerCase("en");
+    const fetched = await guild.channels.fetchActiveThreads(false);
+    return [...fetched.threads.values()]
+      .filter((thread) => {
+        if (query && !thread.name.toLocaleLowerCase("en").includes(query))
+          return false;
+        return (
+          thread
+            .permissionsFor(requester)
+            ?.has(PermissionFlagsBits.ViewChannel) === true &&
+          thread.permissionsFor(bot)?.has(PermissionFlagsBits.ViewChannel) ===
+            true
+        );
+      })
+      .slice(0, input.limit)
+      .map(threadSnapshot);
   }
 
   async findMember(input: {
@@ -140,9 +184,31 @@ export class DiscordJsAgentAdapter implements DiscordAgentAdapter {
     return { messageId: message.id, emoji: input.emoji };
   }
 
+  async removeOwnReaction(input: {
+    messageId: string;
+    emoji: string;
+  }): Promise<{ messageId: string; emoji: string; removed: boolean }> {
+    const message = await this.fetchMessage(
+      input.messageId,
+      PermissionFlagsBits.ReadMessageHistory,
+    );
+    const reaction = message.reactions.resolve(input.emoji);
+    const botUserId = this.dependencies.client.user?.id;
+    if (!reaction || !botUserId) {
+      return {
+        messageId: message.id,
+        emoji: input.emoji,
+        removed: false,
+      };
+    }
+    await reaction.users.remove(botUserId);
+    return { messageId: message.id, emoji: input.emoji, removed: true };
+  }
+
   async sendMessage(input: {
     channelId?: string;
     content: string;
+    nonce: string;
   }): Promise<{ messageId: string; channelId: string }> {
     const channel = await this.fetchTextChannel(
       input.channelId,
@@ -157,8 +223,36 @@ export class DiscordJsAgentAdapter implements DiscordAgentAdapter {
     const message = await channel.send({
       content: input.content,
       allowedMentions: { parse: [] },
+      nonce: input.nonce,
+      enforceNonce: true,
     });
     return { messageId: message.id, channelId: message.channelId };
+  }
+
+  async replyToMessage(input: {
+    messageId: string;
+    content: string;
+    nonce: string;
+  }): Promise<{
+    messageId: string;
+    channelId: string;
+    replyToMessageId: string;
+  }> {
+    const target = await this.fetchMessage(
+      input.messageId,
+      PermissionFlagsBits.SendMessages,
+    );
+    const reply = await target.reply({
+      content: input.content,
+      allowedMentions: { parse: [], repliedUser: false },
+      nonce: input.nonce,
+      enforceNonce: true,
+    });
+    return {
+      messageId: reply.id,
+      channelId: reply.channelId,
+      replyToMessageId: target.id,
+    };
   }
 
   async createThread(input: {
@@ -181,6 +275,12 @@ export class DiscordJsAgentAdapter implements DiscordAgentAdapter {
         "guild_required",
         "Threads can only be created inside a server",
       );
+    }
+    const existing = await this.dependencies.client.channels
+      .fetch(message.id)
+      .catch(() => undefined);
+    if (existing?.isThread()) {
+      return { threadId: existing.id, name: existing.name };
     }
     const thread = await message.startThread({
       name: input.name,
@@ -239,6 +339,47 @@ export class DiscordJsAgentAdapter implements DiscordAgentAdapter {
       `Requested by Discord user ${this.dependencies.requesterUserId}`,
     );
     return { messageId: message.id };
+  }
+
+  async unpinMessage(input: {
+    messageId: string;
+  }): Promise<{ messageId: string }> {
+    const message = await this.fetchMessage(
+      input.messageId,
+      PermissionFlagsBits.ManageMessages,
+    );
+    await message.unpin(
+      `Requested by Discord user ${this.dependencies.requesterUserId}`,
+    );
+    return { messageId: message.id };
+  }
+
+  async editThread(input: {
+    threadId?: string;
+    name?: string;
+    archived?: boolean;
+  }): Promise<{ threadId: string; name: string; archived: boolean }> {
+    const channelId = input.threadId ?? this.dependencies.channelId;
+    const channel = await this.dependencies.client.channels
+      .fetch(channelId)
+      .catch(() => undefined);
+    if (!channel?.isThread()) {
+      throw new AgentToolError(
+        "thread_not_found",
+        "That thread is unavailable",
+      );
+    }
+    await this.assertCanManageThread(channel);
+    const updated = await channel.edit({
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.archived !== undefined ? { archived: input.archived } : {}),
+      reason: `Requested by Discord user ${this.dependencies.requesterUserId}`,
+    });
+    return {
+      threadId: updated.id,
+      name: updated.name,
+      archived: updated.archived ?? false,
+    };
   }
 
   private async fetchMessage(
@@ -313,6 +454,28 @@ export class DiscordJsAgentAdapter implements DiscordAgentAdapter {
     );
   }
 
+  private async assertCanManageThread(thread: ThreadChannel): Promise<void> {
+    const requester = await thread.guild.members.fetch(
+      this.dependencies.requesterUserId,
+    );
+    const bot = await this.fetchBotMember(thread.guild);
+    for (const member of [requester, bot]) {
+      const permissions = thread.permissionsFor(member);
+      const ownsThread = thread.ownerId === member.id;
+      if (
+        !permissions?.has(PermissionFlagsBits.ViewChannel) ||
+        (!ownsThread && !permissions.has(PermissionFlagsBits.ManageThreads))
+      ) {
+        throw new AgentToolError(
+          "missing_permission",
+          member.id === requester.id
+            ? "You cannot manage that thread"
+            : "The bot cannot manage that thread",
+        );
+      }
+    }
+  }
+
   private async fetchBotMember(guild: Guild): Promise<GuildMember> {
     const cached = guild.members.me;
     if (cached) return cached;
@@ -357,5 +520,19 @@ function memberSnapshot(member: GuildMember): DiscordMemberSnapshot {
       .filter((role) => role.id !== member.guild.id)
       .map((role) => role.name)
       .slice(0, 30),
+  };
+}
+
+function threadSnapshot(thread: ThreadChannel): DiscordThreadSnapshot {
+  return {
+    id: thread.id,
+    name: thread.name,
+    ...(thread.parentId ? { parentId: thread.parentId } : {}),
+    ...(thread.ownerId ? { ownerId: thread.ownerId } : {}),
+    archived: thread.archived ?? false,
+    locked: thread.locked ?? false,
+    ...(thread.messageCount !== null
+      ? { messageCount: thread.messageCount }
+      : {}),
   };
 }

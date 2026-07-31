@@ -97,25 +97,28 @@ export class AgentLoop<TContext> {
       iteration += 1
     ) {
       this.assertRunActive(input.signal, startedAt);
-      const turn = await this.dependencies.client.completeToolTurn(
+      const turn = await this.completeModelTurn(
         messages,
-        this.dependencies.model,
         definitions,
+        input.signal,
+        startedAt,
       );
       promptTokens += turn.promptTokens ?? 0;
       completionTokens += turn.completionTokens ?? 0;
       messages.push(turn.assistantMessage);
-      await this.dependencies.observer?.modelTurn?.({
-        runId,
-        iteration,
-        toolCallCount: turn.toolCalls.length,
-        ...(turn.promptTokens !== undefined
-          ? { promptTokens: turn.promptTokens }
-          : {}),
-        ...(turn.completionTokens !== undefined
-          ? { completionTokens: turn.completionTokens }
-          : {}),
-      });
+      await this.observe("model turn", () =>
+        this.dependencies.observer?.modelTurn?.({
+          runId,
+          iteration,
+          toolCallCount: turn.toolCalls.length,
+          ...(turn.promptTokens !== undefined
+            ? { promptTokens: turn.promptTokens }
+            : {}),
+          ...(turn.completionTokens !== undefined
+            ? { completionTokens: turn.completionTokens }
+            : {}),
+        }),
+      );
 
       if (turn.toolCalls.length === 0) {
         return {
@@ -156,7 +159,9 @@ export class AgentLoop<TContext> {
           name: execution.name,
           content: execution.output,
         });
-        await this.dependencies.observer?.toolExecution?.(execution);
+        await this.observe("tool execution", () =>
+          this.dependencies.observer?.toolExecution?.(execution),
+        );
       }
     }
 
@@ -180,40 +185,38 @@ export class AgentLoop<TContext> {
     const results = new Array<AgentToolExecution | undefined>(
       input.calls.length,
     );
-    const parallel: Array<{
+    let parallel: Array<{
       index: number;
       call: AssistantToolCall;
     }> = [];
-    const sequential: Array<{
-      index: number;
-      call: AssistantToolCall;
-    }> = [];
+    const flushParallel = async () => {
+      const batch = parallel;
+      parallel = [];
+      await mapWithConcurrency(
+        batch,
+        this.options.maxParallelToolCalls,
+        async ({ index, call }) => {
+          results[index] = await this.executeTool({
+            ...input,
+            call,
+          });
+        },
+      );
+    };
 
     for (const [index, call] of input.calls.entries()) {
       const tool = input.tools.get(call.function.name);
       if (tool?.effect === "read" && tool.parallelSafe) {
         parallel.push({ index, call });
-      } else {
-        sequential.push({ index, call });
+        continue;
       }
-    }
-
-    await mapWithConcurrency(
-      parallel,
-      this.options.maxParallelToolCalls,
-      async ({ index, call }) => {
-        results[index] = await this.executeTool({
-          ...input,
-          call,
-        });
-      },
-    );
-    for (const { index, call } of sequential) {
+      await flushParallel();
       results[index] = await this.executeTool({
         ...input,
         call,
       });
     }
+    await flushParallel();
 
     return results.filter(
       (result): result is AgentToolExecution => result !== undefined,
@@ -296,29 +299,49 @@ export class AgentLoop<TContext> {
     }
 
     this.assertRunActive(input.signal, input.startedAt);
-    const timeoutMs = tool.timeoutMs ?? this.options.toolTimeoutMs;
+    const remainingRunMs =
+      this.options.runTimeoutMs - (Date.now() - input.startedAt);
+    const configuredToolTimeout =
+      tool.timeoutMs ?? this.options.toolTimeoutMs;
+    const timeoutMs = Math.max(
+      1,
+      Math.min(configuredToolTimeout, remainingRunMs),
+    );
+    const timeoutReason =
+      remainingRunMs <= configuredToolTimeout ? "run_timeout" : "tool_timeout";
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort("tool_timeout"), timeoutMs);
+    const timeout = setTimeout(
+      () => controller.abort(timeoutReason),
+      timeoutMs,
+    );
     const abort = () => controller.abort(input.signal?.reason ?? "aborted");
     input.signal?.addEventListener("abort", abort, { once: true });
 
     try {
-      const result = await tool.execute(parsed.data, input.context, {
-        runId: input.runId,
-        callId: input.call.id,
-        iteration: input.iteration,
-        signal: controller.signal,
-      });
-      if (controller.signal.aborted) {
-        throw new AgentToolError(
-          controller.signal.reason === "tool_timeout"
-            ? "tool_timeout"
-            : "aborted",
-          controller.signal.reason === "tool_timeout"
-            ? `Tool exceeded its ${timeoutMs}ms timeout`
-            : "Tool execution was aborted",
-        );
-      }
+      const result = await raceWithAbort(
+        tool.execute(parsed.data, input.context, {
+          runId: input.runId,
+          callId: input.call.id,
+          iteration: input.iteration,
+          signal: controller.signal,
+        }),
+        controller.signal,
+        () => {
+          if (input.signal?.aborted) {
+            return new AgentLoopError("Agent run was aborted", "aborted");
+          }
+          if (controller.signal.reason === "run_timeout") {
+            return new AgentLoopError(
+              `Agent exceeded its ${this.options.runTimeoutMs}ms run timeout`,
+              "run_timeout",
+            );
+          }
+          return new AgentToolError(
+            "tool_timeout",
+            `Tool exceeded its ${configuredToolTimeout}ms timeout`,
+          );
+        },
+      );
       const execution: AgentToolExecution = {
         callId: input.call.id,
         name: tool.name,
@@ -337,6 +360,7 @@ export class AgentLoop<TContext> {
       }
       return execution;
     } catch (error) {
+      if (error instanceof AgentLoopError) throw error;
       const known = error instanceof AgentToolError;
       this.dependencies.logger.warn(
         {
@@ -404,6 +428,68 @@ export class AgentLoop<TContext> {
       );
     }
   }
+
+  private async completeModelTurn(
+    messages: AgentRunResult["messages"],
+    definitions: ReturnType<typeof asFunctionToolDefinition>[],
+    signal: AbortSignal | undefined,
+    startedAt: number,
+  ) {
+    this.assertRunActive(signal, startedAt);
+    const remainingMs = Math.max(
+      1,
+      this.options.runTimeoutMs - (Date.now() - startedAt),
+    );
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort("run_timeout"),
+      remainingMs,
+    );
+    const abort = () => controller.abort(signal?.reason ?? "aborted");
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+    try {
+      return await raceWithAbort(
+        this.dependencies.client.completeToolTurn(
+          messages,
+          this.dependencies.model,
+          definitions,
+          controller.signal,
+        ),
+        controller.signal,
+        () =>
+          signal?.aborted
+            ? new AgentLoopError("Agent run was aborted", "aborted")
+            : new AgentLoopError(
+                `Agent exceeded its ${this.options.runTimeoutMs}ms run timeout`,
+                "run_timeout",
+              ),
+      );
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  private async observe(
+    event: string,
+    operation: () => Promise<void> | void | undefined,
+  ): Promise<void> {
+    try {
+      await operation();
+    } catch (error) {
+      this.dependencies.logger.warn(
+        {
+          err:
+            error instanceof Error
+              ? { name: error.name, message: error.message }
+              : "unknown observer error",
+          event,
+        },
+        "agent observer failed without interrupting the run",
+      );
+    }
+  }
 }
 
 export function stableStringify(value: unknown): string {
@@ -416,10 +502,32 @@ export function serializeToolOutput(
 ): string {
   const serialized = JSON.stringify(value);
   if (serialized.length <= maximumCharacters) return serialized;
+  const ok =
+    value &&
+    typeof value === "object" &&
+    "ok" in value &&
+    typeof (value as { ok?: unknown }).ok === "boolean"
+      ? (value as { ok: boolean }).ok
+      : true;
   return JSON.stringify({
-    ok: true,
+    ok,
     truncated: true,
     output: serialized.slice(0, Math.max(0, maximumCharacters - 120)),
+  });
+}
+
+function raceWithAbort<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+  abortError: () => Error,
+): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise<T>((resolve, reject) => {
+    const aborted = () => reject(abortError());
+    signal.addEventListener("abort", aborted, { once: true });
+    operation.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", aborted);
+    });
   });
 }
 

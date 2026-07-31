@@ -17,6 +17,18 @@ const migrations = [
     version: "004_agent_memory",
     path: new URL("./migrations/004_agent_memory.sql", import.meta.url),
   },
+  {
+    version: "005_semantic_memory",
+    path: new URL("./migrations/005_semantic_memory.sql", import.meta.url),
+  },
+  {
+    version: "006_agent_reliability",
+    path: new URL("./migrations/006_agent_reliability.sql", import.meta.url),
+  },
+  {
+    version: "007_memory_graph",
+    path: new URL("./migrations/007_memory_graph.sql", import.meta.url),
+  },
 ] as const;
 
 export async function migrate(pool: DatabasePool): Promise<void> {

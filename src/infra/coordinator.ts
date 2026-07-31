@@ -161,20 +161,56 @@ export class Coordinator {
 
 export class Semaphore {
   private active = 0;
-  private readonly waiting: Array<() => void> = [];
+  private readonly waiting: Array<{
+    resume: () => void;
+    signal?: AbortSignal;
+    abort?: () => void;
+  }> = [];
 
   constructor(private readonly limit: number) {}
 
-  async use<T>(operation: () => Promise<T>): Promise<T> {
+  async use<T>(
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    if (signal?.aborted) {
+      throw new DOMException("Semaphore wait was aborted", "AbortError");
+    }
     if (this.active >= this.limit) {
-      await new Promise<void>((resolve) => this.waiting.push(resolve));
+      await new Promise<void>((resolve, reject) => {
+        const waiter: {
+          resume: () => void;
+          signal?: AbortSignal;
+          abort?: () => void;
+        } = {
+          resume: () => {
+            waiter.signal?.removeEventListener("abort", waiter.abort!);
+            resolve();
+          },
+          ...(signal ? { signal } : {}),
+        };
+        if (signal) {
+          waiter.abort = () => {
+            const index = this.waiting.indexOf(waiter);
+            if (index >= 0) this.waiting.splice(index, 1);
+            reject(
+              new DOMException("Semaphore wait was aborted", "AbortError"),
+            );
+          };
+          signal.addEventListener("abort", waiter.abort, { once: true });
+        }
+        this.waiting.push(waiter);
+      });
+    }
+    if (signal?.aborted) {
+      throw new DOMException("Semaphore wait was aborted", "AbortError");
     }
     this.active += 1;
     try {
       return await operation();
     } finally {
       this.active -= 1;
-      this.waiting.shift()?.();
+      this.waiting.shift()?.resume();
     }
   }
 }

@@ -205,6 +205,16 @@ export function buildAnswerMessages(input: AnswerPromptInput): ChatMessage[] {
       importance: memory.importance,
       evidenceMessageIds: memory.evidenceMessageIds,
       updatedAt: memory.updatedAt.toISOString(),
+      ...(memory.linkedFromMemoryId !== undefined
+        ? {
+            graphLink: {
+              seedMemoryId: memory.linkedFromMemoryId,
+              relation: memory.linkRelation,
+              confidence: memory.linkConfidence,
+              direction: memory.linkDirection,
+            },
+          }
+        : {}),
     })),
     pendingCommitments: (input.pendingCommitments ?? []).map((memory) => ({
       id: memory.id,
@@ -214,6 +224,16 @@ export function buildAnswerMessages(input: AnswerPromptInput): ChatMessage[] {
       content: memory.content.slice(0, 2_000),
       confidence: memory.confidence,
       updatedAt: memory.updatedAt.toISOString(),
+      ...(memory.linkedFromMemoryId !== undefined
+        ? {
+            graphLink: {
+              seedMemoryId: memory.linkedFromMemoryId,
+              relation: memory.linkRelation,
+              confidence: memory.linkConfidence,
+              direction: memory.linkDirection,
+            },
+          }
+        : {}),
     })),
     relevantOlderMessages: input.relevant.map((message) => ({
       at: message.createdAt.toISOString(),

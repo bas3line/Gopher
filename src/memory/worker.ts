@@ -102,6 +102,11 @@ export class MemoryWorker {
       candidates: extraction.candidates,
       source: "extracted",
     });
+    await this.dependencies.store.upsertMemoryLinks({
+      guildId: job.guildId,
+      channelId: job.channelId,
+      relations: extraction.relations,
+    });
     const lastMessage = batch.messages.at(-1);
     if (!lastMessage) return;
     await this.dependencies.store.finishMemoryIngestion({

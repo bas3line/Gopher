@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { loadConfig, normalizeChatCompletionsUrl } from "../src/config.ts";
+import {
+  loadConfig,
+  normalizeChatCompletionsUrl,
+  normalizeEmbeddingsUrl,
+} from "../src/config.ts";
 
 const requiredEnvironment = {
   NODE_ENV: "test",
@@ -30,6 +34,17 @@ describe("configuration", () => {
     );
   });
 
+  test("normalizes a base or chat endpoint to the embeddings endpoint", () => {
+    expect(normalizeEmbeddingsUrl("https://provider.example/v1/")).toBe(
+      "https://provider.example/v1/embeddings",
+    );
+    expect(
+      normalizeEmbeddingsUrl(
+        "https://provider.example/v1/chat/completions",
+      ),
+    ).toBe("https://provider.example/v1/embeddings");
+  });
+
   test("loads bounded behavior defaults", () => {
     const config = loadConfig(requiredEnvironment);
     expect(config.openAI.maxTokens).toBe(2_400);
@@ -39,7 +54,9 @@ describe("configuration", () => {
     expect(config.text.model).toBe("FW-GLM-5.2");
     expect(config.text.maxTokens).toBe(16_384);
     expect(config.text.summaryMaxTokens).toBe(16_384);
+    expect(config.text.memoryMaxTokens).toBe(8_192);
     expect(config.text.reasoningEffort).toBe("none");
+    expect(config.embedding).toBeUndefined();
     expect(config.ownerUserIds).toEqual([]);
     expect(config.cloudflare.voiceFallback).toBeTrue();
     expect(config.cloudflare.voiceModel).toBe("@cf/deepgram/aura-2-en");
@@ -72,6 +89,61 @@ describe("configuration", () => {
     expect(config.ambientEvaluationCooldownSeconds).toBe(12);
     expect(config.maxVisionRequestsPerMinute).toBe(10);
     expect(config.summaryEveryMessages).toBe(40);
+    expect(config.agent).toEqual({
+      enabled: true,
+      discordActionsEnabled: true,
+      maxIterations: 8,
+      maxToolCalls: 24,
+      maxParallelToolCalls: 6,
+      runTimeoutMs: 120_000,
+      toolTimeoutMs: 30_000,
+    });
+    expect(config.memory).toEqual({
+      workerEnabled: true,
+      batchSize: 32,
+      pollMs: 750,
+      recallCount: 12,
+    });
+  });
+
+  test("requires a complete HTTPS embedding configuration", () => {
+    expect(
+      loadConfig({
+        ...requiredEnvironment,
+        EMBEDDING_API_URL: "https://provider.example/v1",
+        EMBEDDING_API_KEY: "embedding-key",
+        EMBEDDING_MODEL: "text-embedding-3-large",
+      }).embedding,
+    ).toEqual({
+      endpoint: "https://provider.example/v1/embeddings",
+      apiKey: "embedding-key",
+      model: "text-embedding-3-large",
+      dimensions: 1_024,
+      batchSize: 64,
+    });
+    expect(() =>
+      loadConfig({
+        ...requiredEnvironment,
+        EMBEDDING_API_URL: "https://provider.example/v1",
+      }),
+    ).toThrow("must be configured together");
+    expect(() =>
+      loadConfig({
+        ...requiredEnvironment,
+        EMBEDDING_API_URL: "http://provider.example/v1",
+        EMBEDDING_API_KEY: "embedding-key",
+        EMBEDDING_MODEL: "text-embedding-3-large",
+      }),
+    ).toThrow("must use HTTPS");
+    expect(() =>
+      loadConfig({
+        ...requiredEnvironment,
+        EMBEDDING_API_URL: "https://provider.example/v1",
+        EMBEDDING_API_KEY: "embedding-key",
+        EMBEDDING_MODEL: "text-embedding-3-large",
+        EMBEDDING_DIMENSIONS: "768",
+      }),
+    ).toThrow("must be 1024");
   });
 
   test("parses and validates configured Discord owner IDs", () => {

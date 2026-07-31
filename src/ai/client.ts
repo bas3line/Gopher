@@ -26,7 +26,11 @@ export interface CompletionResult {
 }
 
 export interface CompletionClient {
-  complete(messages: ChatMessage[], model: string): Promise<CompletionResult>;
+  complete(
+    messages: ChatMessage[],
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<CompletionResult>;
 }
 
 export interface FunctionToolDefinition {
@@ -75,6 +79,7 @@ export interface AgentCompletionClient extends CompletionClient {
     messages: AgentChatMessage[],
     model: string,
     tools: FunctionToolDefinition[],
+    signal?: AbortSignal,
   ): Promise<AgentTurnResult>;
 }
 
@@ -160,8 +165,14 @@ export class AIClient implements AgentCompletionClient {
   async complete(
     messages: ChatMessage[],
     model: string,
+    signal?: AbortSignal,
   ): Promise<CompletionResult> {
-    const turn = await this.completeProviderTurn(messages, model);
+    const turn = await this.completeProviderTurn(
+      messages,
+      model,
+      undefined,
+      signal,
+    );
     const wasTruncated = turn.finishReason === "length";
     if (wasTruncated && !this.options.acceptTruncatedOutput) {
       throw new AIProviderError(
@@ -194,8 +205,14 @@ export class AIClient implements AgentCompletionClient {
     messages: AgentChatMessage[],
     model: string,
     tools: FunctionToolDefinition[],
+    signal?: AbortSignal,
   ): Promise<AgentTurnResult> {
-    const turn = await this.completeProviderTurn(messages, model, tools);
+    const turn = await this.completeProviderTurn(
+      messages,
+      model,
+      tools,
+      signal,
+    );
     if (turn.finishReason === "length") {
       throw new AIProviderError(
         "AI provider exhausted its answer budget during an agent turn",
@@ -233,13 +250,17 @@ export class AIClient implements AgentCompletionClient {
     messages: AgentChatMessage[],
     model: string,
     tools?: FunctionToolDefinition[],
+    signal?: AbortSignal,
   ): Promise<ProviderTurn> {
     const maxRetries = this.options.maxRetries ?? 2;
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      if (signal?.aborted) {
+        throw new AIProviderError("AI provider request was aborted", false);
+      }
       try {
-        return await this.request(messages, model, tools);
+        return await this.request(messages, model, tools, signal);
       } catch (error) {
         lastError = error;
         const retryable = error instanceof AIProviderError && error.retryable;
@@ -255,7 +276,16 @@ export class AIClient implements AgentCompletionClient {
     messages: AgentChatMessage[],
     model: string,
     tools?: FunctionToolDefinition[],
+    signal?: AbortSignal,
   ): Promise<ProviderTurn> {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort("provider_timeout"),
+      this.options.timeoutMs ?? 75_000,
+    );
+    const abort = () => controller.abort(signal?.reason ?? "aborted");
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
     let response: Response;
     try {
       response = await fetch(this.options.endpoint, {
@@ -282,19 +312,27 @@ export class AIClient implements AgentCompletionClient {
               }
             : {}),
         }),
-        signal: AbortSignal.timeout(this.options.timeoutMs ?? 75_000),
+        signal: controller.signal,
         redirect: "error",
       });
     } catch (error) {
+      if (signal?.aborted) {
+        throw new AIProviderError("AI provider request was aborted", false);
+      }
       const retryable =
+        controller.signal.reason === "provider_timeout" ||
         error instanceof TypeError ||
-        (error instanceof DOMException && error.name === "TimeoutError");
+        (error instanceof DOMException &&
+          (error.name === "AbortError" || error.name === "TimeoutError"));
       throw new AIProviderError(
         retryable
           ? "AI provider timed out or could not be reached"
           : "AI provider request failed",
         retryable,
       );
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
     }
 
     const requestId =

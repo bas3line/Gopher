@@ -1,4 +1,6 @@
 import type { DatabasePool } from "../db/pool.ts";
+import type { EmbeddingProvider } from "../ai/embeddings.ts";
+import type { Logger } from "../logger.ts";
 import type {
   ConversationSummary,
   RelevantMemory,
@@ -13,9 +15,13 @@ import type {
   DurableMemory,
   MemoryCandidate,
   MemoryContextPack,
+  MemoryEmbeddingJob,
+  MemoryIdentity,
   MemoryIngestionBatch,
   MemoryIngestionJob,
   MemoryKind,
+  MemoryRelation,
+  MemoryRelationCandidate,
   MemoryRecallInput,
   MemorySource,
 } from "./types.ts";
@@ -34,7 +40,13 @@ interface RecordMessageInput {
 }
 
 export class MemoryStore {
-  constructor(private readonly pool: DatabasePool) {}
+  constructor(
+    private readonly pool: DatabasePool,
+    private readonly options: {
+      embedding?: EmbeddingProvider;
+      logger?: Logger;
+    } = {},
+  ) {}
 
   async recordMessage(input: RecordMessageInput): Promise<number | undefined> {
     const client = await this.pool.connect();
@@ -153,6 +165,7 @@ export class MemoryStore {
           SELECT id, content
           FROM chat_messages
           WHERE discord_message_id = $1
+            AND deleted_at IS NULL
           FOR UPDATE
         `,
         [input.discordMessageId],
@@ -206,6 +219,104 @@ export class MemoryStore {
           JSON.stringify({ discordMessageId: input.discordMessageId }),
           input.editedAt,
         ],
+      );
+      await client.query(
+        `
+          INSERT INTO memory_item_revisions (
+            memory_item_id,
+            version,
+            previous_content,
+            previous_confidence,
+            previous_importance,
+            previous_status,
+            reason,
+            evidence_message_ids
+          )
+          SELECT
+            id,
+            version,
+            content,
+            confidence,
+            importance,
+            status,
+            'A supporting Discord message was edited; the old interpretation was superseded.',
+            ARRAY[$2]::text[]
+          FROM memory_items
+          WHERE guild_id = $1
+            AND status = 'active'
+            AND $2 = ANY(evidence_message_ids)
+          ON CONFLICT (memory_item_id, version) DO NOTHING
+        `,
+        [input.guildId, input.discordMessageId],
+      );
+      await client.query(
+        `
+          UPDATE memory_items
+          SET status = 'superseded',
+              evidence_message_ids = array_remove(
+                evidence_message_ids,
+                $2
+              ),
+              version = version + 1,
+              updated_at = now()
+          WHERE guild_id = $1
+            AND status = 'active'
+            AND $2 = ANY(evidence_message_ids)
+        `,
+        [input.guildId, input.discordMessageId],
+      );
+      await client.query(
+        `
+          INSERT INTO memory_link_revisions (
+            from_memory_id,
+            to_memory_id,
+            relation,
+            previous_confidence,
+            previous_evidence_message_ids,
+            reason
+          )
+          SELECT
+            from_memory_id,
+            to_memory_id,
+            relation,
+            confidence,
+            evidence_message_ids,
+            'A supporting Discord message was edited; graph provenance was revoked.'
+          FROM memory_links
+          WHERE $1 = ANY(evidence_message_ids)
+        `,
+        [input.discordMessageId],
+      );
+      await client.query(
+        `
+          DELETE FROM memory_links
+          WHERE $1 = ANY(evidence_message_ids)
+            AND cardinality(evidence_message_ids) = 1
+        `,
+        [input.discordMessageId],
+      );
+      await client.query(
+        `
+          UPDATE memory_links
+          SET evidence_message_ids = array_remove(
+                evidence_message_ids,
+                $1
+              ),
+              confidence = GREATEST(0, confidence - 0.1),
+              updated_at = now()
+          WHERE $1 = ANY(evidence_message_ids)
+        `,
+        [input.discordMessageId],
+      );
+      await client.query(
+        `
+          DELETE FROM memory_embedding_jobs AS jobs
+          USING memory_items AS items
+          WHERE items.id = jobs.memory_item_id
+            AND items.guild_id = $1
+            AND items.status <> 'active'
+        `,
+        [input.guildId],
       );
       await client.query(
         `
@@ -276,6 +387,7 @@ export class MemoryStore {
         await client.query("COMMIT");
         return false;
       }
+      const deletedMessageId = Number(updated.rows[0].id);
       await client.query(
         `
           INSERT INTO discord_events (
@@ -298,6 +410,162 @@ export class MemoryStore {
           JSON.stringify({ discordMessageId: input.discordMessageId }),
           input.deletedAt,
         ],
+      );
+      await client.query(
+        `
+          INSERT INTO memory_item_revisions (
+            memory_item_id,
+            version,
+            previous_content,
+            previous_confidence,
+            previous_importance,
+            previous_status,
+            reason,
+            evidence_message_ids
+          )
+          SELECT
+            id,
+            version,
+            content,
+            confidence,
+            importance,
+            status,
+            'A supporting Discord message was deleted; provenance was revoked.',
+            ARRAY[$2]::text[]
+          FROM memory_items
+          WHERE guild_id = $1
+            AND status = 'active'
+            AND $2 = ANY(evidence_message_ids)
+          ON CONFLICT (memory_item_id, version) DO NOTHING
+        `,
+        [input.guildId, input.discordMessageId],
+      );
+      await client.query(
+        `
+          UPDATE memory_items
+          SET evidence_message_ids = array_remove(
+                evidence_message_ids,
+                $2
+              ),
+              status = CASE
+                WHEN cardinality(
+                  array_remove(evidence_message_ids, $2)
+                ) = 0
+                  THEN 'forgotten'
+                ELSE status
+              END,
+              confidence = CASE
+                WHEN cardinality(
+                  array_remove(evidence_message_ids, $2)
+                ) = 0
+                  THEN confidence
+                ELSE GREATEST(0, confidence - 0.1)
+              END,
+              version = version + 1,
+              updated_at = now()
+          WHERE guild_id = $1
+            AND status = 'active'
+            AND $2 = ANY(evidence_message_ids)
+        `,
+        [input.guildId, input.discordMessageId],
+      );
+      await client.query(
+        `
+          INSERT INTO memory_link_revisions (
+            from_memory_id,
+            to_memory_id,
+            relation,
+            previous_confidence,
+            previous_evidence_message_ids,
+            reason
+          )
+          SELECT
+            from_memory_id,
+            to_memory_id,
+            relation,
+            confidence,
+            evidence_message_ids,
+            'A supporting Discord message was deleted; graph provenance was revoked.'
+          FROM memory_links
+          WHERE $1 = ANY(evidence_message_ids)
+        `,
+        [input.discordMessageId],
+      );
+      await client.query(
+        `
+          DELETE FROM memory_links
+          WHERE $1 = ANY(evidence_message_ids)
+            AND cardinality(evidence_message_ids) = 1
+        `,
+        [input.discordMessageId],
+      );
+      await client.query(
+        `
+          UPDATE memory_links
+          SET evidence_message_ids = array_remove(
+                evidence_message_ids,
+                $1
+              ),
+              confidence = GREATEST(0, confidence - 0.1),
+              updated_at = now()
+          WHERE $1 = ANY(evidence_message_ids)
+        `,
+        [input.discordMessageId],
+      );
+      await client.query(
+        `
+          DELETE FROM memory_embedding_jobs AS jobs
+          USING memory_items AS items
+          WHERE items.id = jobs.memory_item_id
+            AND items.guild_id = $1
+            AND items.status <> 'active'
+        `,
+        [input.guildId],
+      );
+      await client.query(
+        `
+          INSERT INTO memory_channel_checkpoints (
+            guild_id,
+            channel_id,
+            last_message_id
+          )
+          VALUES ($1, $2, GREATEST(0, $3::bigint - 1))
+          ON CONFLICT (guild_id, channel_id) DO UPDATE
+          SET last_message_id = LEAST(
+                memory_channel_checkpoints.last_message_id,
+                EXCLUDED.last_message_id
+              ),
+              updated_at = now()
+        `,
+        [input.guildId, input.channelId, deletedMessageId],
+      );
+      await client.query(
+        `
+          INSERT INTO memory_ingestion_jobs (
+            guild_id,
+            channel_id,
+            through_message_id
+          )
+          SELECT $1, $2, COALESCE(MAX(id), $3::bigint)
+          FROM chat_messages
+          WHERE guild_id = $1
+            AND channel_id = $2
+          ON CONFLICT (guild_id, channel_id, through_message_id) DO UPDATE
+          SET status = 'pending',
+              attempts = 0,
+              available_at = now(),
+              locked_at = NULL,
+              last_error_code = NULL,
+              completed_at = NULL
+        `,
+        [input.guildId, input.channelId, deletedMessageId],
+      );
+      await client.query(
+        `
+          DELETE FROM conversation_summaries
+          WHERE guild_id = $1 AND channel_id = $2
+        `,
+        [input.guildId, input.channelId],
       );
       await client.query("COMMIT");
       return true;
@@ -352,7 +620,9 @@ export class MemoryStore {
       `
         SELECT id, discord_message_id, guild_id, channel_id, user_id, username, role, content, created_at
         FROM chat_messages
-        WHERE guild_id = $1 AND channel_id = $2
+        WHERE guild_id = $1
+          AND channel_id = $2
+          AND deleted_at IS NULL
         ORDER BY id DESC
         LIMIT $3
       `,
@@ -398,6 +668,7 @@ export class MemoryStore {
         FROM chat_messages, search
         WHERE guild_id = $1
           AND channel_id = $2
+          AND deleted_at IS NULL
           AND search_vector @@ search.query
         ORDER BY rank DESC, id DESC
         LIMIT $4
@@ -457,7 +728,10 @@ export class MemoryStore {
       `
         SELECT id, discord_message_id, guild_id, channel_id, user_id, username, role, content, created_at
         FROM chat_messages
-        WHERE guild_id = $1 AND channel_id = $2 AND id > $3
+        WHERE guild_id = $1
+          AND channel_id = $2
+          AND id > $3
+          AND deleted_at IS NULL
         ORDER BY id ASC
         LIMIT $4
       `,
@@ -537,23 +811,100 @@ export class MemoryStore {
 
   async recall(input: MemoryRecallInput): Promise<DurableMemory[]> {
     const query = input.query.trim().slice(0, 2_000);
+    const semantic = await this.embedRecallQuery(input, query);
+    const candidateLimit = Math.max(40, Math.min(160, input.limit * 8));
     const result = await this.pool.query<MemoryRow>(
       `
-        WITH search AS (
+        WITH settings AS MATERIALIZED (
+          SELECT
+            set_config('hnsw.ef_search', '100', true),
+            set_config('hnsw.iterative_scan', 'strict_order', true)
+        ),
+        search AS (
           SELECT CASE
             WHEN char_length(trim($4)) >= 2
               THEN websearch_to_tsquery('english', $4)
             ELSE NULL::tsquery
           END AS query
+        ),
+        lexical AS (
+          SELECT
+            memory_items.id,
+            (
+              COALESCE(
+                ts_rank_cd(memory_items.search_vector, search.query),
+                0
+              ) * 4.0
+              + GREATEST(
+                  similarity(memory_items.content, $4),
+                  similarity(
+                    replace(memory_items.memory_key, '.', ' '),
+                    $4
+                  )
+                ) * 1.5
+            )::float8 AS lexical_score
+          FROM memory_items
+          CROSS JOIN search
+          WHERE memory_items.guild_id = $1
+            AND memory_items.status = 'active'
+            AND (
+              memory_items.expires_at IS NULL
+              OR memory_items.expires_at > now()
+            )
+            AND (
+              ($5::boolean AND memory_items.scope = 'channel' AND memory_items.scope_id = $2)
+              OR ($6::boolean AND memory_items.scope = 'user' AND memory_items.scope_id = $3)
+              OR ($7::boolean AND memory_items.scope = 'guild' AND memory_items.scope_id = $1)
+            )
+            AND ($8::text[] IS NULL OR memory_items.kind = ANY($8::text[]))
+            AND (
+              search.query IS NULL
+              OR memory_items.search_vector @@ search.query
+              OR similarity(memory_items.content, $4) >= 0.08
+              OR similarity(
+                replace(memory_items.memory_key, '.', ' '),
+                $4
+              ) >= 0.12
+            )
+          ORDER BY lexical_score DESC, memory_items.updated_at DESC
+          LIMIT $12
+        ),
+        semantic AS (
+          SELECT
+            memory_items.id,
+            (
+              1.0 - (memory_items.embedding <=> $10::vector)
+            )::float8 AS semantic_similarity
+          FROM memory_items
+          CROSS JOIN settings
+          WHERE ($10::vector) IS NOT NULL
+            AND memory_items.embedding IS NOT NULL
+            AND memory_items.embedding_model = $11
+            AND memory_items.guild_id = $1
+            AND memory_items.status = 'active'
+            AND (
+              memory_items.expires_at IS NULL
+              OR memory_items.expires_at > now()
+            )
+            AND (
+              ($5::boolean AND memory_items.scope = 'channel' AND memory_items.scope_id = $2)
+              OR ($6::boolean AND memory_items.scope = 'user' AND memory_items.scope_id = $3)
+              OR ($7::boolean AND memory_items.scope = 'guild' AND memory_items.scope_id = $1)
+            )
+            AND ($8::text[] IS NULL OR memory_items.kind = ANY($8::text[]))
+          ORDER BY memory_items.embedding <=> $10::vector
+          LIMIT $12
+        ),
+        candidates AS (
+          SELECT id FROM lexical
+          UNION
+          SELECT id FROM semantic
         )
         SELECT
           memory_items.*,
           (
-            COALESCE(ts_rank_cd(memory_items.search_vector, search.query), 0) * 4.0
-            + GREATEST(
-                similarity(memory_items.content, $4),
-                similarity(replace(memory_items.memory_key, '.', ' '), $4)
-              ) * 1.5
+            COALESCE(lexical.lexical_score, 0)
+            + COALESCE(semantic.semantic_similarity, 0) * 3.5
             + (memory_items.importance::float8 / 10.0) * 1.2
             + memory_items.confidence::float8 * 0.8
             + CASE WHEN memory_items.pinned THEN 2.0 ELSE 0.0 END
@@ -566,27 +917,12 @@ export class MemoryStore {
                 )
               ) * 0.6
             + ln(memory_items.access_count + 1.0) * 0.1
-          )::float8 AS score
+          )::float8 AS score,
+          semantic.semantic_similarity
         FROM memory_items
-        CROSS JOIN search
-        WHERE memory_items.guild_id = $1
-          AND memory_items.status = 'active'
-          AND (
-            memory_items.expires_at IS NULL
-            OR memory_items.expires_at > now()
-          )
-          AND (
-            ($5::boolean AND memory_items.scope = 'channel' AND memory_items.scope_id = $2)
-            OR ($6::boolean AND memory_items.scope = 'user' AND memory_items.scope_id = $3)
-            OR ($7::boolean AND memory_items.scope = 'guild' AND memory_items.scope_id = $1)
-          )
-          AND ($8::text[] IS NULL OR memory_items.kind = ANY($8::text[]))
-          AND (
-            search.query IS NULL
-            OR memory_items.search_vector @@ search.query
-            OR similarity(memory_items.content, $4) >= 0.08
-            OR similarity(replace(memory_items.memory_key, '.', ' '), $4) >= 0.12
-          )
+        INNER JOIN candidates ON candidates.id = memory_items.id
+        LEFT JOIN lexical ON lexical.id = memory_items.id
+        LEFT JOIN semantic ON semantic.id = memory_items.id
         ORDER BY memory_items.pinned DESC, score DESC, memory_items.updated_at DESC
         LIMIT $9
       `,
@@ -600,9 +936,28 @@ export class MemoryStore {
         input.includeGuild ?? true,
         input.kinds?.length ? input.kinds : null,
         input.limit,
+        semantic?.vector ?? null,
+        semantic?.model ?? null,
+        candidateLimit,
       ],
     );
-    const memories = result.rows.map(mapMemoryRow);
+    const primary = result.rows.map(mapMemoryRow);
+    const graph = await this.expandRecallGraph(input, primary);
+    const byId = new Map<number, DurableMemory>();
+    for (const memory of [...primary, ...graph]) {
+      const existing = byId.get(memory.id);
+      if (!existing || memory.score > existing.score) {
+        byId.set(memory.id, memory);
+      }
+    }
+    const memories = [...byId.values()]
+      .sort(
+        (left, right) =>
+          Number(right.pinned) - Number(left.pinned) ||
+          right.score - left.score ||
+          right.updatedAt.getTime() - left.updatedAt.getTime(),
+      )
+      .slice(0, input.limit);
     if (memories.length > 0) {
       await this.pool.query(
         `
@@ -615,6 +970,168 @@ export class MemoryStore {
       );
     }
     return memories;
+  }
+
+  private async expandRecallGraph(
+    input: MemoryRecallInput,
+    seeds: DurableMemory[],
+  ): Promise<DurableMemory[]> {
+    if (seeds.length === 0 || input.limit <= 1) return [];
+    const seedScores = new Map(seeds.map((memory) => [memory.id, memory.score]));
+    const result = await this.pool.query<MemoryRow>(
+      `
+        WITH edges AS (
+          SELECT
+            CASE
+              WHEN links.from_memory_id = ANY($4::bigint[])
+                THEN links.to_memory_id
+              ELSE links.from_memory_id
+            END AS neighbor_id,
+            CASE
+              WHEN links.from_memory_id = ANY($4::bigint[])
+                THEN links.from_memory_id
+              ELSE links.to_memory_id
+            END AS seed_id,
+            links.relation,
+            links.confidence,
+            CASE
+              WHEN links.from_memory_id = ANY($4::bigint[])
+                THEN 'outbound'
+              ELSE 'inbound'
+            END AS direction,
+            links.updated_at
+          FROM memory_links AS links
+          WHERE links.from_memory_id = ANY($4::bigint[])
+             OR links.to_memory_id = ANY($4::bigint[])
+        ),
+        strongest_edges AS (
+          SELECT DISTINCT ON (neighbor_id)
+            neighbor_id,
+            seed_id,
+            relation,
+            confidence,
+            direction
+          FROM edges
+          WHERE neighbor_id <> ALL($4::bigint[])
+          ORDER BY neighbor_id, confidence DESC, updated_at DESC
+        )
+        SELECT
+          memory_items.*,
+          (
+            strongest_edges.confidence::float8 * 1.4
+            + (memory_items.importance::float8 / 10.0) * 1.2
+            + memory_items.confidence::float8 * 0.8
+            + CASE WHEN memory_items.pinned THEN 2.0 ELSE 0.0 END
+            + (
+                1.0 / (
+                  1.0
+                  + EXTRACT(EPOCH FROM (now() - memory_items.updated_at))
+                    / 86400.0
+                    / 30.0
+                )
+              ) * 0.6
+          )::float8 AS score,
+          NULL::float8 AS semantic_similarity,
+          strongest_edges.seed_id AS linked_from_memory_id,
+          strongest_edges.relation AS link_relation,
+          strongest_edges.confidence AS link_confidence,
+          strongest_edges.direction AS link_direction
+        FROM strongest_edges
+        INNER JOIN memory_items
+          ON memory_items.id = strongest_edges.neighbor_id
+        WHERE memory_items.guild_id = $1
+          AND memory_items.status = 'active'
+          AND (
+            memory_items.expires_at IS NULL
+            OR memory_items.expires_at > now()
+          )
+          AND (
+            ($5::boolean AND memory_items.scope = 'channel' AND memory_items.scope_id = $2)
+            OR ($6::boolean AND memory_items.scope = 'user' AND memory_items.scope_id = $3)
+            OR ($7::boolean AND memory_items.scope = 'guild' AND memory_items.scope_id = $1)
+          )
+          AND ($8::text[] IS NULL OR memory_items.kind = ANY($8::text[]))
+        ORDER BY
+          memory_items.pinned DESC,
+          score DESC,
+          memory_items.updated_at DESC
+        LIMIT $9
+      `,
+      [
+        input.guildId,
+        input.channelId,
+        input.userId,
+        seeds.map((memory) => memory.id),
+        input.includeChannel ?? true,
+        input.includeUser ?? true,
+        input.includeGuild ?? true,
+        input.kinds?.length ? input.kinds : null,
+        Math.max(8, Math.min(64, input.limit * 4)),
+      ],
+    );
+    return result.rows.map((row) => {
+      const memory = mapMemoryRow(row);
+      const seedScore = memory.linkedFromMemoryId
+        ? seedScores.get(memory.linkedFromMemoryId)
+        : undefined;
+      return {
+        ...memory,
+        score:
+          seedScore === undefined
+            ? memory.score
+            : Math.max(
+                memory.score,
+                seedScore * 0.72 + (memory.linkConfidence ?? 0) * 1.2,
+              ),
+      };
+    });
+  }
+
+  private async embedRecallQuery(
+    input: MemoryRecallInput,
+    query: string,
+  ): Promise<{ vector: string; model: string } | undefined> {
+    const embedding = this.options.embedding;
+    if (!embedding || query.length < 2) return undefined;
+    const startedAt = performance.now();
+    try {
+      const result = await embedding.embed([query]);
+      const vector = result.vectors[0];
+      if (!vector) return undefined;
+      await this.recordAIEvent({
+        guildId: input.guildId,
+        channelId: input.channelId,
+        userId: input.userId,
+        model: embedding.model,
+        kind: "memory_embed",
+        success: true,
+        latencyMs: Math.round(performance.now() - startedAt),
+        ...(result.promptTokens !== undefined
+          ? { promptTokens: result.promptTokens }
+          : {}),
+      }).catch(() => undefined);
+      return { vector: vectorSql(vector), model: embedding.model };
+    } catch (error) {
+      this.options.logger?.warn(
+        {
+          err:
+            error instanceof Error
+              ? { name: error.name, message: error.message }
+              : "unknown embedding error",
+        },
+        "semantic memory query embedding failed; using lexical recall",
+      );
+      await this.recordAIEvent({
+        guildId: input.guildId,
+        channelId: input.channelId,
+        userId: input.userId,
+        model: embedding.model,
+        kind: "memory_embed",
+        success: false,
+        latencyMs: Math.round(performance.now() - startedAt),
+      }).catch(() => undefined);
+      return undefined;
+    }
   }
 
   async contextPack(input: MemoryRecallInput): Promise<MemoryContextPack> {
@@ -814,6 +1331,69 @@ export class MemoryStore {
         );
         savedIds.push(Number(row.id));
       }
+      if (savedIds.length > 0) {
+        await client.query(
+          `
+            INSERT INTO memory_embedding_jobs (
+              memory_item_id,
+              guild_id,
+              channel_id,
+              memory_version
+            )
+            SELECT id, guild_id, $2, version
+            FROM memory_items
+            WHERE id = ANY($1::bigint[])
+              AND status = 'active'
+            ON CONFLICT (memory_item_id) DO UPDATE
+            SET guild_id = EXCLUDED.guild_id,
+                channel_id = EXCLUDED.channel_id,
+                memory_version = EXCLUDED.memory_version,
+                status = CASE
+                  WHEN memory_embedding_jobs.memory_version
+                       <> EXCLUDED.memory_version
+                    OR memory_embedding_jobs.status = 'failed'
+                    THEN 'pending'
+                  ELSE memory_embedding_jobs.status
+                END,
+                attempts = CASE
+                  WHEN memory_embedding_jobs.memory_version
+                       <> EXCLUDED.memory_version
+                    OR memory_embedding_jobs.status = 'failed'
+                    THEN 0
+                  ELSE memory_embedding_jobs.attempts
+                END,
+                available_at = CASE
+                  WHEN memory_embedding_jobs.memory_version
+                       <> EXCLUDED.memory_version
+                    OR memory_embedding_jobs.status = 'failed'
+                    THEN now()
+                  ELSE memory_embedding_jobs.available_at
+                END,
+                locked_at = CASE
+                  WHEN memory_embedding_jobs.memory_version
+                       <> EXCLUDED.memory_version
+                    OR memory_embedding_jobs.status = 'failed'
+                    THEN NULL
+                  ELSE memory_embedding_jobs.locked_at
+                END,
+                last_error_code = CASE
+                  WHEN memory_embedding_jobs.memory_version
+                       <> EXCLUDED.memory_version
+                    OR memory_embedding_jobs.status = 'failed'
+                    THEN NULL
+                  ELSE memory_embedding_jobs.last_error_code
+                END,
+                completed_at = CASE
+                  WHEN memory_embedding_jobs.memory_version
+                       <> EXCLUDED.memory_version
+                    OR memory_embedding_jobs.status = 'failed'
+                    THEN NULL
+                  ELSE memory_embedding_jobs.completed_at
+                END
+          `,
+          [[...new Set(savedIds)], input.channelId],
+        );
+      }
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
@@ -833,6 +1413,112 @@ export class MemoryStore {
       [savedIds],
     );
     return saved.rows.map(mapMemoryRow);
+  }
+
+  async upsertMemoryLinks(input: {
+    guildId: string;
+    channelId: string;
+    relations: MemoryRelationCandidate[];
+  }): Promise<number> {
+    if (input.relations.length === 0) return 0;
+    const client = await this.pool.connect();
+    let saved = 0;
+    try {
+      await client.query("BEGIN");
+      for (const relation of input.relations.slice(0, 24)) {
+        const fromScopeId = memoryIdentityScopeId(
+          relation.from,
+          input.guildId,
+          input.channelId,
+        );
+        const toScopeId = memoryIdentityScopeId(
+          relation.to,
+          input.guildId,
+          input.channelId,
+        );
+        if (!fromScopeId || !toScopeId) continue;
+        const endpoints = await client.query<{ id: string; endpoint: string }>(
+          `
+            SELECT id, 'from'::text AS endpoint
+            FROM memory_items
+            WHERE guild_id = $1
+              AND scope = $2
+              AND scope_id = $3
+              AND kind = $4
+              AND memory_key = $5
+              AND status = 'active'
+            UNION ALL
+            SELECT id, 'to'::text AS endpoint
+            FROM memory_items
+            WHERE guild_id = $1
+              AND scope = $6
+              AND scope_id = $7
+              AND kind = $8
+              AND memory_key = $9
+              AND status = 'active'
+          `,
+          [
+            input.guildId,
+            relation.from.scope,
+            fromScopeId,
+            relation.from.kind,
+            normalizeMemoryKey(relation.from.key),
+            relation.to.scope,
+            toScopeId,
+            relation.to.kind,
+            normalizeMemoryKey(relation.to.key),
+          ],
+        );
+        const fromId = endpoints.rows.find(
+          (endpoint) => endpoint.endpoint === "from",
+        )?.id;
+        const toId = endpoints.rows.find(
+          (endpoint) => endpoint.endpoint === "to",
+        )?.id;
+        if (!fromId || !toId || fromId === toId) continue;
+        const result = await client.query(
+          `
+            INSERT INTO memory_links (
+              from_memory_id,
+              to_memory_id,
+              relation,
+              confidence,
+              evidence_message_ids
+            )
+            VALUES ($1, $2, $3, $4, $5::text[])
+            ON CONFLICT (from_memory_id, to_memory_id, relation) DO UPDATE
+            SET confidence = GREATEST(
+                  memory_links.confidence,
+                  EXCLUDED.confidence
+                ),
+                evidence_message_ids = ARRAY(
+                  SELECT DISTINCT value
+                  FROM unnest(
+                    memory_links.evidence_message_ids
+                    || EXCLUDED.evidence_message_ids
+                  ) AS value
+                  LIMIT 32
+                ),
+                updated_at = now()
+          `,
+          [
+            fromId,
+            toId,
+            relation.relation,
+            relation.confidence,
+            relation.evidenceMessageIds,
+          ],
+        );
+        saved += result.rowCount ?? 0;
+      }
+      await client.query("COMMIT");
+      return saved;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async forgetMemory(input: {
@@ -902,6 +1588,10 @@ export class MemoryStore {
               updated_at = now()
           WHERE id = $1
         `,
+        [row.id],
+      );
+      await client.query(
+        "DELETE FROM memory_embedding_jobs WHERE memory_item_id = $1",
         [row.id],
       );
       await client.query("COMMIT");
@@ -1015,6 +1705,7 @@ export class MemoryStore {
           AND channel_id = $2
           AND id > $3
           AND id <= $4
+          AND deleted_at IS NULL
         ORDER BY id
         LIMIT $5
       `,
@@ -1151,6 +1842,359 @@ export class MemoryStore {
     );
   }
 
+  async claimMemoryEmbeddingJobs(
+    maximumJobs: number,
+    model: string,
+  ): Promise<MemoryEmbeddingJob[]> {
+    const result = await this.pool.query<{
+      memory_item_id: string;
+      guild_id: string;
+      channel_id: string;
+      memory_version: number;
+      kind: MemoryKind;
+      memory_key: string;
+      content: string;
+      attempts: number;
+    }>(
+      `
+        WITH candidates AS (
+          SELECT jobs.memory_item_id
+          FROM memory_embedding_jobs AS jobs
+          INNER JOIN memory_items AS items
+            ON items.id = jobs.memory_item_id
+          WHERE items.status = 'active'
+            AND (
+              (
+                jobs.status = 'pending'
+                AND jobs.available_at <= now()
+              )
+              OR (
+                jobs.status = 'processing'
+                AND jobs.locked_at < now() - interval '5 minutes'
+              )
+              OR (
+                jobs.status = 'completed'
+                AND (
+                  items.embedding IS NULL
+                  OR items.embedding_model IS DISTINCT FROM $2
+                  OR jobs.memory_version <> items.version
+                )
+              )
+            )
+          ORDER BY
+            items.pinned DESC,
+            items.importance DESC,
+            jobs.available_at,
+            jobs.memory_item_id
+          FOR UPDATE OF jobs SKIP LOCKED
+          LIMIT $1
+        )
+        UPDATE memory_embedding_jobs AS jobs
+        SET status = 'processing',
+            attempts = CASE
+              WHEN jobs.status = 'completed'
+                OR jobs.memory_version <> items.version
+                THEN 1
+              ELSE jobs.attempts + 1
+            END,
+            memory_version = items.version,
+            locked_at = now(),
+            last_error_code = NULL,
+            completed_at = NULL
+        FROM candidates
+        INNER JOIN memory_items AS items
+          ON items.id = candidates.memory_item_id
+        WHERE jobs.memory_item_id = candidates.memory_item_id
+        RETURNING
+          jobs.memory_item_id,
+          jobs.guild_id,
+          jobs.channel_id,
+          jobs.memory_version,
+          items.kind,
+          items.memory_key,
+          items.content,
+          jobs.attempts
+      `,
+      [maximumJobs, model],
+    );
+    return result.rows.map((row) => ({
+      memoryItemId: Number(row.memory_item_id),
+      guildId: row.guild_id,
+      channelId: row.channel_id,
+      memoryVersion: row.memory_version,
+      kind: row.kind,
+      key: row.memory_key,
+      content: row.content,
+      attempts: row.attempts,
+    }));
+  }
+
+  async finishMemoryEmbeddingJobs(input: {
+    jobs: MemoryEmbeddingJob[];
+    vectors: number[][];
+    model: string;
+  }): Promise<number> {
+    if (input.jobs.length !== input.vectors.length) {
+      throw new Error("embedding job and vector counts must match");
+    }
+    const client = await this.pool.connect();
+    let completed = 0;
+    try {
+      await client.query("BEGIN");
+      for (const [index, job] of input.jobs.entries()) {
+        const vector = input.vectors[index];
+        if (!vector) continue;
+        const updated = await client.query(
+          `
+            UPDATE memory_items
+            SET embedding = $3::vector,
+                embedding_model = $4,
+                embedded_at = now()
+            WHERE id = $1
+              AND version = $2
+              AND status = 'active'
+          `,
+          [
+            job.memoryItemId,
+            job.memoryVersion,
+            vectorSql(vector),
+            input.model,
+          ],
+        );
+        if ((updated.rowCount ?? 0) > 0) completed += 1;
+        await client.query(
+          `
+            UPDATE memory_embedding_jobs AS jobs
+            SET status = CASE
+                  WHEN items.version = $2
+                    AND items.status = 'active'
+                    AND $3::boolean
+                    THEN 'completed'
+                  ELSE 'pending'
+                END,
+                available_at = now(),
+                locked_at = NULL,
+                last_error_code = NULL,
+                completed_at = CASE
+                  WHEN items.version = $2
+                    AND items.status = 'active'
+                    AND $3::boolean
+                    THEN now()
+                  ELSE NULL
+                END,
+                memory_version = items.version
+            FROM memory_items AS items
+            WHERE jobs.memory_item_id = $1
+              AND items.id = jobs.memory_item_id
+          `,
+          [
+            job.memoryItemId,
+            job.memoryVersion,
+            (updated.rowCount ?? 0) > 0,
+          ],
+        );
+      }
+      await client.query("COMMIT");
+      return completed;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async failMemoryEmbeddingJobs(
+    jobs: MemoryEmbeddingJob[],
+    errorCode: string,
+  ): Promise<void> {
+    if (jobs.length === 0) return;
+    await this.pool.query(
+      `
+        UPDATE memory_embedding_jobs
+        SET status = CASE WHEN attempts >= 8 THEN 'failed' ELSE 'pending' END,
+            available_at = now()
+              + LEAST(900, power(2, attempts)::integer) * interval '1 second',
+            locked_at = NULL,
+            last_error_code = $2,
+            completed_at = CASE WHEN attempts >= 8 THEN now() ELSE NULL END
+        WHERE memory_item_id = ANY($1::bigint[])
+          AND status = 'processing'
+      `,
+      [
+        jobs.map((job) => job.memoryItemId),
+        errorCode.replace(/[^a-z0-9_.:-]/gi, "_").slice(0, 120),
+      ],
+    );
+  }
+
+  async claimAgentAction(input: {
+    requestDiscordMessageId: string;
+    toolName: string;
+    argumentsHash: string;
+    runId: string;
+    callId: string;
+  }): Promise<
+    | { status: "execute" }
+    | { status: "completed"; result: Record<string, unknown> }
+    | { status: "in_progress" }
+  > {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query<{
+        status: "started" | "completed" | "failed";
+        result: unknown;
+        lease_until: Date;
+      }>(
+        `
+          SELECT status, result, lease_until
+          FROM agent_action_receipts
+          WHERE request_discord_message_id = $1
+            AND tool_name = $2
+            AND arguments_hash = $3
+          FOR UPDATE
+        `,
+        [
+          input.requestDiscordMessageId,
+          input.toolName,
+          input.argumentsHash,
+        ],
+      );
+      const row = existing.rows[0];
+      if (!row) {
+        await client.query(
+          `
+            INSERT INTO agent_action_receipts (
+              request_discord_message_id,
+              tool_name,
+              arguments_hash,
+              run_id,
+              call_id,
+              status,
+              lease_until
+            )
+            VALUES (
+              $1, $2, $3, $4, $5, 'started', now() + interval '5 minutes'
+            )
+          `,
+          [
+            input.requestDiscordMessageId,
+            input.toolName,
+            input.argumentsHash,
+            input.runId,
+            input.callId,
+          ],
+        );
+        await client.query("COMMIT");
+        return { status: "execute" };
+      }
+      if (row.status === "completed") {
+        await client.query("COMMIT");
+        return {
+          status: "completed",
+          result:
+            row.result &&
+            typeof row.result === "object" &&
+            !Array.isArray(row.result)
+              ? (row.result as Record<string, unknown>)
+              : {},
+        };
+      }
+      if (row.status === "started" && row.lease_until.getTime() > Date.now()) {
+        await client.query("COMMIT");
+        return { status: "in_progress" };
+      }
+      await client.query(
+        `
+          UPDATE agent_action_receipts
+          SET run_id = $4,
+              call_id = $5,
+              status = 'started',
+              attempts = attempts + 1,
+              result = NULL,
+              error_code = NULL,
+              lease_until = now() + interval '5 minutes',
+              updated_at = now(),
+              completed_at = NULL
+          WHERE request_discord_message_id = $1
+            AND tool_name = $2
+            AND arguments_hash = $3
+        `,
+        [
+          input.requestDiscordMessageId,
+          input.toolName,
+          input.argumentsHash,
+          input.runId,
+          input.callId,
+        ],
+      );
+      await client.query("COMMIT");
+      return { status: "execute" };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async completeAgentAction(input: {
+    requestDiscordMessageId: string;
+    toolName: string;
+    argumentsHash: string;
+    result: Record<string, unknown>;
+  }): Promise<void> {
+    await this.pool.query(
+      `
+        UPDATE agent_action_receipts
+        SET status = 'completed',
+            result = $4::jsonb,
+            error_code = NULL,
+            lease_until = now(),
+            updated_at = now(),
+            completed_at = now()
+        WHERE request_discord_message_id = $1
+          AND tool_name = $2
+          AND arguments_hash = $3
+          AND status = 'started'
+      `,
+      [
+        input.requestDiscordMessageId,
+        input.toolName,
+        input.argumentsHash,
+        JSON.stringify(input.result),
+      ],
+    );
+  }
+
+  async failAgentAction(input: {
+    requestDiscordMessageId: string;
+    toolName: string;
+    argumentsHash: string;
+    errorCode: string;
+  }): Promise<void> {
+    await this.pool.query(
+      `
+        UPDATE agent_action_receipts
+        SET status = 'failed',
+            error_code = $4,
+            lease_until = now(),
+            updated_at = now()
+        WHERE request_discord_message_id = $1
+          AND tool_name = $2
+          AND arguments_hash = $3
+          AND status = 'started'
+      `,
+      [
+        input.requestDiscordMessageId,
+        input.toolName,
+        input.argumentsHash,
+        input.errorCode.replace(/[^a-z0-9_.:-]/gi, "_").slice(0, 120),
+      ],
+    );
+  }
+
   async startAgentRun(input: AgentRunStart): Promise<void> {
     await this.pool.query(
       `
@@ -1253,6 +2297,7 @@ export class MemoryStore {
     channel: number;
     guild: number;
     pendingIngestion: number;
+    pendingEmbedding: number;
   }> {
     const result = await this.pool.query<{
       total: string;
@@ -1260,6 +2305,7 @@ export class MemoryStore {
       channel_count: string;
       guild_count: string;
       pending_ingestion: string;
+      pending_embedding: string;
     }>(
       `
         SELECT
@@ -1287,6 +2333,13 @@ export class MemoryStore {
               AND channel_id = $2
               AND status IN ('pending', 'processing')
           ) AS pending_ingestion
+          ,
+          (
+            SELECT COUNT(*)
+            FROM memory_embedding_jobs
+            WHERE guild_id = $1
+              AND status IN ('pending', 'processing')
+          ) AS pending_embedding
         FROM memory_items
         WHERE guild_id = $1
       `,
@@ -1299,6 +2352,7 @@ export class MemoryStore {
       channel: Number(row?.channel_count ?? 0),
       guild: Number(row?.guild_count ?? 0),
       pendingIngestion: Number(row?.pending_ingestion ?? 0),
+      pendingEmbedding: Number(row?.pending_embedding ?? 0),
     };
   }
 
@@ -1314,7 +2368,8 @@ export class MemoryStore {
       | "voice_stt"
       | "voice_chat"
       | "agent"
-      | "memory_extract";
+      | "memory_extract"
+      | "memory_embed";
     success: boolean;
     latencyMs: number;
     promptTokens?: number;
@@ -1379,6 +2434,13 @@ interface MemoryRow {
   created_at: Date;
   updated_at: Date;
   score: number;
+  semantic_similarity?: number | null;
+  embedding_model?: string | null;
+  embedded_at?: Date | null;
+  linked_from_memory_id?: string | null;
+  link_relation?: MemoryRelation | null;
+  link_confidence?: number | null;
+  link_direction?: "outbound" | "inbound" | null;
 }
 
 function mapStoredMessageRow(row: StoredMessageRow): StoredMessage {
@@ -1423,6 +2485,20 @@ function mapMemoryRow(row: MemoryRow): DurableMemory {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     score: Number(row.score),
+    ...(row.semantic_similarity !== undefined &&
+    row.semantic_similarity !== null
+      ? { semanticSimilarity: Number(row.semantic_similarity) }
+      : {}),
+    ...(row.embedding_model ? { embeddingModel: row.embedding_model } : {}),
+    ...(row.embedded_at ? { embeddedAt: row.embedded_at } : {}),
+    ...(row.linked_from_memory_id
+      ? { linkedFromMemoryId: Number(row.linked_from_memory_id) }
+      : {}),
+    ...(row.link_relation ? { linkRelation: row.link_relation } : {}),
+    ...(row.link_confidence !== undefined && row.link_confidence !== null
+      ? { linkConfidence: Number(row.link_confidence) }
+      : {}),
+    ...(row.link_direction ? { linkDirection: row.link_direction } : {}),
   };
 }
 
@@ -1443,4 +2519,26 @@ export function normalizeMemoryKey(input: string): string {
 
 function normalizeMemoryContent(input: string): string {
   return input.trim().replace(/\s+/g, " ").toLocaleLowerCase("en");
+}
+
+function memoryIdentityScopeId(
+  identity: MemoryIdentity,
+  guildId: string,
+  channelId: string,
+): string | undefined {
+  return identity.scope === "user"
+    ? identity.subjectUserId
+    : identity.scope === "channel"
+      ? channelId
+      : guildId;
+}
+
+function vectorSql(vector: number[]): string {
+  if (
+    vector.length !== 1_024 ||
+    vector.some((value) => !Number.isFinite(value))
+  ) {
+    throw new Error("semantic-memory vectors must contain 1024 finite numbers");
+  }
+  return `[${vector.join(",")}]`;
 }

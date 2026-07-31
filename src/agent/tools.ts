@@ -1,5 +1,9 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
-import { AgentToolError } from "./loop.ts";
+import {
+  AgentToolError,
+  stableStringify,
+} from "./loop.ts";
 import type { AgentRequestContext } from "./context.ts";
 import type { AgentTool } from "./types.ts";
 import { memoryKindSchema } from "../memory/types.ts";
@@ -303,6 +307,29 @@ export function createAgentTools(
       },
     }),
     defineTool({
+      name: "discord_get_message",
+      description:
+        "Fetch one exact message from the current Discord channel by ID, including author, content, reply reference, attachments, and timestamp.",
+      parameters: {
+        type: "object",
+        properties: {
+          messageId: { type: "string" },
+        },
+        required: ["messageId"],
+        additionalProperties: false,
+      },
+      schema: z
+        .object({ messageId: z.string().min(1).max(40) })
+        .strict(),
+      effect: "read",
+      parallelSafe: true,
+      async execute(arguments_, context) {
+        return {
+          message: await requireDiscord(context).getMessage(arguments_),
+        };
+      },
+    }),
+    defineTool({
       name: "discord_list_channels",
       description:
         "List server channels visible to both the requester and bot, optionally filtered by name.",
@@ -325,6 +352,35 @@ export function createAgentTools(
       async execute(arguments_, context) {
         return {
           channels: await requireDiscord(context).listChannels({
+            limit: arguments_.limit,
+            ...(arguments_.query ? { query: arguments_.query } : {}),
+          }),
+        };
+      },
+    }),
+    defineTool({
+      name: "discord_list_threads",
+      description:
+        "List active server threads visible to both requester and bot, optionally filtered by name.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", maxLength: 100 },
+          limit: { type: "integer", minimum: 1, maximum: 50 },
+        },
+        additionalProperties: false,
+      },
+      schema: z
+        .object({
+          query: z.string().trim().min(1).max(100).optional(),
+          limit: z.number().int().min(1).max(50).default(25),
+        })
+        .strict(),
+      effect: "read",
+      parallelSafe: true,
+      async execute(arguments_, context) {
+        return {
+          threads: await requireDiscord(context).listThreads({
             limit: arguments_.limit,
             ...(arguments_.query ? { query: arguments_.query } : {}),
           }),
@@ -387,9 +443,46 @@ export function createAgentTools(
       parallelSafe: false,
       async execute(arguments_, context, execution) {
         assertDiscordWrite(context, "react");
-        const result = await requireDiscord(context).react(arguments_);
-        await recordAgentAction(context, execution, "discord_react", result);
-        return result;
+        return await executeDiscordAction(
+          context,
+          execution,
+          "discord_react",
+          arguments_,
+          async () => await requireDiscord(context).react(arguments_),
+        );
+      },
+    }),
+    defineTool({
+      name: "discord_remove_own_reaction",
+      description:
+        "Remove Gopher's own reaction from a current-channel message. The current user must explicitly ask to remove or undo that reaction.",
+      parameters: {
+        type: "object",
+        properties: {
+          messageId: { type: "string" },
+          emoji: { type: "string", maxLength: 100 },
+        },
+        required: ["messageId", "emoji"],
+        additionalProperties: false,
+      },
+      schema: z
+        .object({
+          messageId: z.string().min(1).max(40),
+          emoji: z.string().trim().min(1).max(100),
+        })
+        .strict(),
+      effect: "write",
+      parallelSafe: false,
+      async execute(arguments_, context, execution) {
+        assertDiscordWrite(context, "unreact");
+        return await executeDiscordAction(
+          context,
+          execution,
+          "discord_remove_own_reaction",
+          arguments_,
+          async () =>
+            await requireDiscord(context).removeOwnReaction(arguments_),
+        );
       },
     }),
     defineTool({
@@ -415,17 +508,58 @@ export function createAgentTools(
       parallelSafe: false,
       async execute(arguments_, context, execution) {
         assertDiscordWrite(context, "send");
-        const result = await requireDiscord(context).sendMessage({
-          content: arguments_.content,
-          ...(arguments_.channelId
-            ? { channelId: arguments_.channelId }
-            : {}),
-        });
-        await recordAgentAction(context, execution, "discord_send_message", {
-          ...result,
-          contentLength: arguments_.content.length,
-        });
-        return result;
+        return await executeDiscordAction(
+          context,
+          execution,
+          "discord_send_message",
+          arguments_,
+          async (nonce) =>
+            await requireDiscord(context).sendMessage({
+              content: arguments_.content,
+              nonce,
+              ...(arguments_.channelId
+                ? { channelId: arguments_.channelId }
+                : {}),
+            }),
+          { contentLength: arguments_.content.length },
+        );
+      },
+    }),
+    defineTool({
+      name: "discord_reply_to_message",
+      description:
+        "Send an inline reply to one current-channel message. Use only when the current user explicitly asks Gopher to reply to that message; this is separate from the normal final answer.",
+      parameters: {
+        type: "object",
+        properties: {
+          messageId: { type: "string" },
+          content: { type: "string", maxLength: 1900 },
+        },
+        required: ["messageId", "content"],
+        additionalProperties: false,
+      },
+      schema: z
+        .object({
+          messageId: z.string().min(1).max(40),
+          content: z.string().trim().min(1).max(1_900),
+        })
+        .strict(),
+      effect: "write",
+      parallelSafe: false,
+      async execute(arguments_, context, execution) {
+        assertDiscordWrite(context, "reply");
+        return await executeDiscordAction(
+          context,
+          execution,
+          "discord_reply_to_message",
+          arguments_,
+          async (nonce) =>
+            await requireDiscord(context).replyToMessage({
+              ...arguments_,
+              nonce,
+            }),
+          { contentLength: arguments_.content.length },
+        );
       },
     }),
     defineTool({
@@ -451,14 +585,67 @@ export function createAgentTools(
       parallelSafe: false,
       async execute(arguments_, context, execution) {
         assertDiscordWrite(context, "thread");
-        const result = await requireDiscord(context).createThread({
-          name: arguments_.name,
-          ...(arguments_.messageId
-            ? { messageId: arguments_.messageId }
-            : {}),
-        });
-        await recordAgentAction(context, execution, "discord_create_thread", result);
-        return result;
+        return await executeDiscordAction(
+          context,
+          execution,
+          "discord_create_thread",
+          arguments_,
+          async () =>
+            await requireDiscord(context).createThread({
+              name: arguments_.name,
+              ...(arguments_.messageId
+                ? { messageId: arguments_.messageId }
+                : {}),
+            }),
+        );
+      },
+    }),
+    defineTool({
+      name: "discord_edit_thread",
+      description:
+        "Rename, archive, or unarchive a Discord thread when the current user explicitly requests it and both requester and bot may manage that thread.",
+      parameters: {
+        type: "object",
+        properties: {
+          threadId: { type: "string" },
+          name: { type: "string", minLength: 1, maxLength: 100 },
+          archived: { type: "boolean" },
+        },
+        additionalProperties: false,
+      },
+      schema: z
+        .object({
+          threadId: z.string().min(1).max(40).optional(),
+          name: z.string().trim().min(1).max(100).optional(),
+          archived: z.boolean().optional(),
+        })
+        .strict()
+        .refine(
+          (value) => value.name !== undefined || value.archived !== undefined,
+          { message: "name or archived is required" },
+        ),
+      effect: "write",
+      parallelSafe: false,
+      async execute(arguments_, context, execution) {
+        assertDiscordWrite(context, "thread_edit");
+        return await executeDiscordAction(
+          context,
+          execution,
+          "discord_edit_thread",
+          arguments_,
+          async () =>
+            await requireDiscord(context).editThread({
+              ...(arguments_.threadId
+                ? { threadId: arguments_.threadId }
+                : {}),
+              ...(arguments_.name !== undefined
+                ? { name: arguments_.name }
+                : {}),
+              ...(arguments_.archived !== undefined
+                ? { archived: arguments_.archived }
+                : {}),
+            }),
+        );
       },
     }),
     defineTool({
@@ -484,13 +671,15 @@ export function createAgentTools(
       parallelSafe: false,
       async execute(arguments_, context, execution) {
         assertDiscordWrite(context, "edit");
-        const result =
-          await requireDiscord(context).editOwnMessage(arguments_);
-        await recordAgentAction(context, execution, "discord_edit_own_message", {
-          ...result,
-          contentLength: arguments_.content.length,
-        });
-        return result;
+        return await executeDiscordAction(
+          context,
+          execution,
+          "discord_edit_own_message",
+          arguments_,
+          async () =>
+            await requireDiscord(context).editOwnMessage(arguments_),
+          { contentLength: arguments_.content.length },
+        );
       },
     }),
     defineTool({
@@ -510,15 +699,14 @@ export function createAgentTools(
       parallelSafe: false,
       async execute(arguments_, context, execution) {
         assertDiscordWrite(context, "delete");
-        const result =
-          await requireDiscord(context).deleteOwnMessage(arguments_);
-        await recordAgentAction(
+        return await executeDiscordAction(
           context,
           execution,
           "discord_delete_own_message",
-          result,
+          arguments_,
+          async () =>
+            await requireDiscord(context).deleteOwnMessage(arguments_),
         );
-        return result;
       },
     }),
     defineTool({
@@ -544,19 +732,59 @@ export function createAgentTools(
             "Pinning through the agent requires a bot owner or server administrator",
           );
         }
-        const result = await requireDiscord(context).pinMessage(arguments_);
-        await recordAgentAction(context, execution, "discord_pin_message", result);
-        return result;
+        return await executeDiscordAction(
+          context,
+          execution,
+          "discord_pin_message",
+          arguments_,
+          async () => await requireDiscord(context).pinMessage(arguments_),
+        );
+      },
+    }),
+    defineTool({
+      name: "discord_unpin_message",
+      description:
+        "Unpin a current-channel message only when the current user explicitly asks and is a server administrator or configured owner.",
+      parameters: {
+        type: "object",
+        properties: { messageId: { type: "string" } },
+        required: ["messageId"],
+        additionalProperties: false,
+      },
+      schema: z
+        .object({ messageId: z.string().min(1).max(40) })
+        .strict(),
+      effect: "write",
+      parallelSafe: false,
+      async execute(arguments_, context, execution) {
+        assertDiscordWrite(context, "unpin");
+        if (!context.isOwner && !context.isAdministrator) {
+          throw new AgentToolError(
+            "administrator_required",
+            "Unpinning through the agent requires a bot owner or server administrator",
+          );
+        }
+        return await executeDiscordAction(
+          context,
+          execution,
+          "discord_unpin_message",
+          arguments_,
+          async () => await requireDiscord(context).unpinMessage(arguments_),
+        );
       },
     }),
   ];
   const discordWriteTools = new Set([
     "discord_react",
+    "discord_remove_own_reaction",
     "discord_send_message",
+    "discord_reply_to_message",
     "discord_create_thread",
+    "discord_edit_thread",
     "discord_edit_own_message",
     "discord_delete_own_message",
     "discord_pin_message",
+    "discord_unpin_message",
   ]);
   return tools.filter((tool) => {
     if (tool.name === "web_search" && options.webEnabled === false) return false;
@@ -586,11 +814,21 @@ export function isExplicitForgetRequest(input: string): boolean {
 
 export function hasExplicitDiscordWriteIntent(
   input: string,
-  kind: "react" | "send" | "thread" | "edit" | "delete" | "pin",
+  kind:
+    | "react"
+    | "unreact"
+    | "send"
+    | "reply"
+    | "thread"
+    | "thread_edit"
+    | "edit"
+    | "delete"
+    | "pin"
+    | "unpin",
 ): boolean {
   const text = input.trim();
   const negated =
-    /\b(?:do\s+not|don't|dont|never)\s+(?:react|send|post|say|reply|create|start|make|edit|change|correct|delete|remove|pin)\b/i.test(
+    /\b(?:do\s+not|don't|dont|never)\s+(?:react|unreact|send|post|say|reply|create|start|make|edit|change|correct|delete|remove|pin|unpin|rename|archive|reopen)\b/i.test(
       text,
     );
   if (negated) return false;
@@ -599,12 +837,29 @@ export function hasExplicitDiscordWriteIntent(
       return /\b(?:react|add (?:a |an |the )?(?:reaction|emoji)|put (?:a |an |the )?.{0,20}(?:reaction|emoji))\b/i.test(
         text,
       );
+    case "unreact":
+      return /\b(?:remove|undo|clear|take off)\b.{0,30}\b(?:your |the |that )?(?:reaction|emoji)\b/i.test(
+        text,
+      );
     case "send":
-      return /\b(?:send|post|write|say|reply)\b.{0,80}\b(?:message|this|that|it|in|to|channel)\b/i.test(
+      return /\b(?:send|post|write|say)\b.{0,80}\b(?:message|this|that|it|in|to|channel)\b/i.test(
+        text,
+      );
+    case "reply":
+      return /\breply\b.{0,80}\b(?:to|message|this|that|it|with)\b/i.test(
         text,
       );
     case "thread":
       return /\b(?:create|start|make|open)\b.{0,30}\bthread\b/i.test(text);
+    case "thread_edit":
+      return (
+        /\b(?:rename|archive|unarchive|reopen|close)\b.{0,35}\bthread\b/i.test(
+          text,
+        ) ||
+        /\bthread\b.{0,35}\b(?:rename|archive|unarchive|reopen|close)\b/i.test(
+          text,
+        )
+      );
     case "edit":
       return /\b(?:edit|change|correct|rewrite)\b.{0,50}\b(?:message|reply|response|it|that)\b/i.test(
         text,
@@ -615,6 +870,8 @@ export function hasExplicitDiscordWriteIntent(
       );
     case "pin":
       return /\bpin\b.{0,40}\b(?:message|this|that|it)?\b/i.test(text);
+    case "unpin":
+      return /\bunpin\b.{0,40}\b(?:message|this|that|it)?\b/i.test(text);
   }
 }
 
@@ -636,6 +893,12 @@ function compactMemory(memory: {
   version: number;
   updatedAt: Date;
   score: number;
+  semanticSimilarity?: number;
+  embeddingModel?: string;
+  linkedFromMemoryId?: number;
+  linkRelation?: string;
+  linkConfidence?: number;
+  linkDirection?: "outbound" | "inbound";
 }) {
   return {
     id: memory.id,
@@ -649,6 +912,22 @@ function compactMemory(memory: {
     version: memory.version,
     updatedAt: memory.updatedAt.toISOString(),
     score: memory.score,
+    ...(memory.semanticSimilarity !== undefined
+      ? { semanticSimilarity: memory.semanticSimilarity }
+      : {}),
+    ...(memory.embeddingModel
+      ? { embeddingModel: memory.embeddingModel }
+      : {}),
+    ...(memory.linkedFromMemoryId !== undefined
+      ? {
+          graphLink: {
+            seedMemoryId: memory.linkedFromMemoryId,
+            relation: memory.linkRelation,
+            confidence: memory.linkConfidence,
+            direction: memory.linkDirection,
+          },
+        }
+      : {}),
   };
 }
 
@@ -664,7 +943,17 @@ function requireDiscord(context: AgentRequestContext) {
 
 function assertDiscordWrite(
   context: AgentRequestContext,
-  kind: "react" | "send" | "thread" | "edit" | "delete" | "pin",
+  kind:
+    | "react"
+    | "unreact"
+    | "send"
+    | "reply"
+    | "thread"
+    | "thread_edit"
+    | "edit"
+    | "delete"
+    | "pin"
+    | "unpin",
 ): void {
   if (!context.discordActionsEnabled) {
     throw new AgentToolError(
@@ -678,6 +967,83 @@ function assertDiscordWrite(
       `The current user did not explicitly request a Discord ${kind} action`,
     );
   }
+}
+
+async function executeDiscordAction<T extends Record<string, unknown>>(
+  context: AgentRequestContext,
+  execution: { runId: string; callId: string },
+  toolName: string,
+  arguments_: unknown,
+  action: (nonce: string) => Promise<T>,
+  auditExtra: Record<string, unknown> = {},
+): Promise<T> {
+  const argumentsHash = createHash("sha256")
+    .update(stableStringify(arguments_))
+    .digest("hex");
+  const claim = await context.memory.claimAgentAction({
+    requestDiscordMessageId: context.discordMessageId,
+    toolName,
+    argumentsHash,
+    runId: execution.runId,
+    callId: execution.callId,
+  });
+  if (claim.status === "completed") {
+    return {
+      ...claim.result,
+      idempotentReplay: true,
+    } as unknown as T;
+  }
+  if (claim.status === "in_progress") {
+    throw new AgentToolError(
+      "action_in_progress",
+      "The same Discord action is already in progress; do not call it again",
+    );
+  }
+
+  let result: T;
+  try {
+    result = await action(argumentsHash.slice(0, 25));
+  } catch (error) {
+    await context.memory
+      .failAgentAction({
+        requestDiscordMessageId: context.discordMessageId,
+        toolName,
+        argumentsHash,
+        errorCode:
+          error instanceof AgentToolError ? error.code : "discord_action_failed",
+      })
+      .catch(() => undefined);
+    throw error;
+  }
+
+  let receiptPersisted = true;
+  try {
+    await context.memory.completeAgentAction({
+      requestDiscordMessageId: context.discordMessageId,
+      toolName,
+      argumentsHash,
+      result,
+    });
+  } catch {
+    try {
+      await context.memory.completeAgentAction({
+        requestDiscordMessageId: context.discordMessageId,
+        toolName,
+        argumentsHash,
+        result,
+      });
+    } catch {
+      receiptPersisted = false;
+    }
+  }
+  await recordAgentAction(context, execution, toolName, {
+    ...result,
+    ...auditExtra,
+    receiptPersisted,
+  }).catch(() => undefined);
+  return receiptPersisted
+    ? result
+    : ({ ...result, receiptPersisted: false } as T);
 }
 
 async function recordAgentAction(

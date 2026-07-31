@@ -1,4 +1,5 @@
 import { AIClient } from "./ai/client.ts";
+import { OpenAIEmbeddingClient } from "./ai/embeddings.ts";
 import { loadConfig } from "./config.ts";
 import { createDatabasePool } from "./db/pool.ts";
 import { migrate } from "./db/migrate.ts";
@@ -8,6 +9,7 @@ import { Coordinator } from "./infra/coordinator.ts";
 import { createLogger } from "./logger.ts";
 import { MemoryStore } from "./memory/store.ts";
 import { MemoryExtractor } from "./memory/extractor.ts";
+import { MemoryEmbeddingWorker } from "./memory/embedding-worker.ts";
 import { MemoryWorker } from "./memory/worker.ts";
 import { MusicStore } from "./music/store.ts";
 import { CloudflareAuraVoice } from "./voice/cloudflare-aura.ts";
@@ -28,7 +30,16 @@ if (!config.discordToken) {
 
 const pool = createDatabasePool(config.databaseUrl, logger);
 const coordinator = new Coordinator(config.redisUrl);
-const memory = new MemoryStore(pool);
+const embeddingAI = config.embedding
+  ? new OpenAIEmbeddingClient({
+      ...config.embedding,
+      logger,
+    })
+  : undefined;
+const memory = new MemoryStore(pool, {
+  ...(embeddingAI ? { embedding: embeddingAI } : {}),
+  logger,
+});
 const musicStore = new MusicStore(pool, config.music.defaultVolume);
 const textAI = new AIClient({
   endpoint: config.text.endpoint,
@@ -113,6 +124,15 @@ const memoryWorker = new MemoryWorker({
   batchSize: config.memory.batchSize,
   idlePollMs: config.memory.pollMs,
 });
+const memoryEmbeddingWorker = embeddingAI
+  ? new MemoryEmbeddingWorker({
+      store: memory,
+      embedding: embeddingAI,
+      logger,
+      batchSize: config.embedding!.batchSize,
+      idlePollMs: config.memory.pollMs,
+    })
+  : undefined;
 const bot = new DiscordBot({
   config,
   textAI,
@@ -138,6 +158,13 @@ async function start(): Promise<void> {
     memoryWorker.start();
     logger.info("durable memory consolidation worker started");
   }
+  if (memoryEmbeddingWorker) {
+    memoryEmbeddingWorker.start();
+    logger.info(
+      { model: embeddingAI?.model, dimensions: embeddingAI?.dimensions },
+      "semantic memory embedding worker started",
+    );
+  }
   await coordinator.connect();
   logger.info("Redis coordination ready");
   await bot.start(config.discordToken!);
@@ -156,7 +183,10 @@ async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, "shutting down");
   healthServer?.stop(true);
   await bot.stop();
-  await memoryWorker.stop();
+  await Promise.all([
+    memoryWorker.stop(),
+    memoryEmbeddingWorker?.stop() ?? Promise.resolve(),
+  ]);
   await Promise.allSettled([coordinator.close(), pool.end()]);
 }
 
@@ -170,7 +200,10 @@ try {
   await start();
 } catch (error) {
   logger.fatal({ err: error }, "startup failed");
-  await memoryWorker.stop();
+  await Promise.all([
+    memoryWorker.stop(),
+    memoryEmbeddingWorker?.stop() ?? Promise.resolve(),
+  ]);
   await Promise.allSettled([coordinator.close(), pool.end()]);
   process.exit(1);
 }

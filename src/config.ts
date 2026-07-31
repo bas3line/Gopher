@@ -41,6 +41,23 @@ const configSchema = z
       .min(512)
       .max(32_768)
       .default(8_192),
+    EMBEDDING_API_URL: optionalTrimmed,
+    EMBEDDING_API_KEY: optionalTrimmed,
+    EMBEDDING_MODEL: optionalTrimmed,
+    EMBEDDING_DIMENSIONS: z.coerce
+      .number()
+      .int()
+      .refine(
+        (value) => value === 1_024,
+        "must be 1024 to match the semantic-memory vector schema",
+      )
+      .default(1_024),
+    EMBEDDING_BATCH_SIZE: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(128)
+      .default(64),
     TEXT_REASONING_EFFORT: z
       .enum(["none", "low", "medium", "high", "max", "xhigh"])
       .default("none"),
@@ -228,6 +245,9 @@ const configSchema = z
     for (const [field, input] of [
       ["TEXT_API_URL", value.TEXT_API_URL],
       ["OPENAI_BASE_URL", value.OPENAI_BASE_URL],
+      ...(value.EMBEDDING_API_URL
+        ? ([["EMBEDDING_API_URL", value.EMBEDDING_API_URL]] as const)
+        : []),
     ] as const) {
       const url = new URL(input);
       if (url.protocol !== "https:" && !localHosts.has(url.hostname)) {
@@ -237,6 +257,23 @@ const configSchema = z
           message: "must use HTTPS unless it targets a local host",
         });
       }
+    }
+    const embeddingFields = [
+      value.EMBEDDING_API_URL,
+      value.EMBEDDING_API_KEY,
+      value.EMBEDDING_MODEL,
+    ];
+    const configuredEmbeddingFields = embeddingFields.filter(Boolean).length;
+    if (
+      configuredEmbeddingFields !== 0 &&
+      configuredEmbeddingFields !== embeddingFields.length
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["EMBEDDING_API_URL"],
+        message:
+          "EMBEDDING_API_URL, EMBEDDING_API_KEY, and EMBEDDING_MODEL must be configured together",
+      });
     }
     if (value.MUSIC_ENABLED && !value.LAVALINK_PASSWORD) {
       context.addIssue({
@@ -260,6 +297,13 @@ export interface AppConfig {
     summaryMaxTokens: number;
     memoryMaxTokens: number;
     reasoningEffort: "none" | "low" | "medium" | "high" | "max" | "xhigh";
+  };
+  embedding?: {
+    endpoint: string;
+    apiKey: string;
+    model: string;
+    dimensions: 1024;
+    batchSize: number;
   };
   cloudflare: {
     accountId: string;
@@ -353,6 +397,19 @@ export function loadConfig(
       memoryMaxTokens: value.MEMORY_MAX_TOKENS,
       reasoningEffort: value.TEXT_REASONING_EFFORT,
     },
+    ...(value.EMBEDDING_API_URL &&
+    value.EMBEDDING_API_KEY &&
+    value.EMBEDDING_MODEL
+      ? {
+          embedding: {
+            endpoint: normalizeEmbeddingsUrl(value.EMBEDDING_API_URL),
+            apiKey: value.EMBEDDING_API_KEY,
+            model: value.EMBEDDING_MODEL,
+            dimensions: value.EMBEDDING_DIMENSIONS as 1024,
+            batchSize: value.EMBEDDING_BATCH_SIZE,
+          },
+        }
+      : {}),
     cloudflare: {
       accountId: value.CLOUDFLARE_ACCOUNT_ID,
       apiToken: value.CLOUDFLARE_API_TOKEN,
@@ -432,6 +489,17 @@ export function normalizeChatCompletionsUrl(input: string): string {
   url.pathname = url.pathname.replace(/\/+$/, "");
   if (!url.pathname.endsWith("/chat/completions")) {
     url.pathname = `${url.pathname}/chat/completions`.replace(/\/{2,}/g, "/");
+  }
+  return url.toString();
+}
+
+export function normalizeEmbeddingsUrl(input: string): string {
+  const url = new URL(input);
+  url.pathname = url.pathname.replace(/\/+$/, "");
+  if (url.pathname.endsWith("/chat/completions")) {
+    url.pathname = url.pathname.replace(/\/chat\/completions$/, "/embeddings");
+  } else if (!url.pathname.endsWith("/embeddings")) {
+    url.pathname = `${url.pathname}/embeddings`.replace(/\/{2,}/g, "/");
   }
   return url.toString();
 }

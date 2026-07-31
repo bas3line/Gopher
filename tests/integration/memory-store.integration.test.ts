@@ -36,8 +36,11 @@ describe.skipIf(!runIntegrationTests)(
     beforeEach(async () => {
       await pool.query(`
         TRUNCATE TABLE
+          agent_action_receipts,
           agent_tool_calls,
           agent_runs,
+          memory_embedding_jobs,
+          memory_link_revisions,
           memory_links,
           memory_item_revisions,
           memory_items,
@@ -420,5 +423,368 @@ describe.skipIf(!runIntegrationTests)(
         kind: "agent",
       });
     });
+
+    test("embeds durable jobs and recalls semantically without leaking another user scope", async () => {
+      const semanticMemory = new MemoryStore(pool, {
+        embedding: {
+          model: "embedding-test-model",
+          dimensions: 1_024,
+          async embed(inputs) {
+            return {
+              vectors: inputs.map(() => unitVector(0)),
+              promptTokens: inputs.length,
+            };
+          },
+        },
+      });
+      await semanticMemory.recordMessage({
+        discordMessageId: "semantic-evidence",
+        guildId: "guild-1",
+        channelId: "channel-1",
+        userId: "user-1",
+        username: "Kira",
+        role: "user",
+        content: "My favorite animal is a cat.",
+      });
+      await semanticMemory.upsertMemories({
+        guildId: "guild-1",
+        channelId: "channel-1",
+        source: "explicit",
+        candidates: [
+          {
+            scope: "user",
+            subjectUserId: "user-1",
+            kind: "preference",
+            key: "preference.animal",
+            content: "Kira's favorite animal is a cat.",
+            importance: 8,
+            confidence: 1,
+            evidenceMessageIds: ["semantic-evidence"],
+            reason: "Explicit preference.",
+          },
+          {
+            scope: "user",
+            subjectUserId: "user-2",
+            kind: "preference",
+            key: "preference.animal",
+            content: "Another member's favorite animal is a cat.",
+            importance: 10,
+            confidence: 1,
+            evidenceMessageIds: ["semantic-evidence"],
+            reason: "Scope isolation fixture.",
+          },
+          {
+            scope: "guild",
+            kind: "fact",
+            key: "server.mascot",
+            content: "The server mascot is an otter.",
+            importance: 5,
+            confidence: 1,
+            evidenceMessageIds: ["semantic-evidence"],
+            reason: "Orthogonal semantic fixture.",
+          },
+        ],
+      });
+      const jobs = await semanticMemory.claimMemoryEmbeddingJobs(
+        10,
+        "embedding-test-model",
+      );
+      expect(jobs).toHaveLength(3);
+      await semanticMemory.finishMemoryEmbeddingJobs({
+        jobs,
+        vectors: jobs.map((job) =>
+          job.key === "server.mascot" ? unitVector(1) : unitVector(0),
+        ),
+        model: "embedding-test-model",
+      });
+
+      const recalled = await semanticMemory.recall({
+        guildId: "guild-1",
+        channelId: "channel-1",
+        userId: "user-1",
+        query: "preferred household companion",
+        limit: 1,
+      });
+      expect(recalled[0]).toMatchObject({
+        key: "preference.animal",
+        content: "Kira's favorite animal is a cat.",
+        embeddingModel: "embedding-test-model",
+      });
+      expect(recalled[0]?.semanticSimilarity).toBeGreaterThan(0.99);
+      expect(recalled.map((item) => item.content)).not.toContain(
+        "Another member's favorite animal is a cat.",
+      );
+    });
+
+    test("expands one grounded graph hop without crossing user scope and revokes deleted evidence", async () => {
+      for (const message of [
+        {
+          discordMessageId: "graph-seed",
+          userId: "user-1",
+          content: "I work best in deep-focus blocks.",
+        },
+        {
+          discordMessageId: "graph-project",
+          userId: "user-1",
+          content: "Project Aurora launches September ninth.",
+        },
+        {
+          discordMessageId: "graph-link",
+          userId: "user-1",
+          content: "My focus routine is part of how I will deliver Aurora.",
+        },
+      ]) {
+        await memory.recordMessage({
+          ...message,
+          guildId: "guild-1",
+          channelId: "channel-1",
+          username: "Kira",
+          role: "user",
+        });
+      }
+      const saved = await memory.upsertMemories({
+        guildId: "guild-1",
+        channelId: "channel-1",
+        source: "explicit",
+        candidates: [
+          {
+            scope: "user",
+            subjectUserId: "user-1",
+            kind: "preference",
+            key: "preference.focus_routine",
+            content: "Kira works best in deep-focus blocks.",
+            importance: 8,
+            confidence: 1,
+            evidenceMessageIds: ["graph-seed"],
+            reason: "Explicit working preference.",
+          },
+          {
+            scope: "guild",
+            kind: "project",
+            key: "project.aurora.launch",
+            content: "Project Aurora launches September ninth.",
+            importance: 9,
+            confidence: 0.98,
+            evidenceMessageIds: ["graph-project"],
+            reason: "Durable project milestone.",
+          },
+          {
+            scope: "user",
+            subjectUserId: "user-2",
+            kind: "fact",
+            key: "profile.playbook",
+            content: "Another member owns the cobalt playbook.",
+            importance: 10,
+            confidence: 1,
+            evidenceMessageIds: ["graph-project"],
+            reason: "Scope-isolation fixture.",
+          },
+        ],
+      });
+      const seed = saved.find(
+        (memory) => memory.key === "preference.focus_routine",
+      )!;
+      const project = saved.find(
+        (memory) => memory.key === "project.aurora.launch",
+      )!;
+      await expect(
+        memory.upsertMemoryLinks({
+          guildId: "guild-1",
+          channelId: "channel-1",
+          relations: [
+            {
+              from: {
+                scope: "user",
+                subjectUserId: "user-1",
+                kind: "preference",
+                key: "preference.focus_routine",
+              },
+              to: {
+                scope: "guild",
+                kind: "project",
+                key: "project.aurora.launch",
+              },
+              relation: "related_to",
+              confidence: 0.94,
+              evidenceMessageIds: ["graph-link"],
+            },
+            {
+              from: {
+                scope: "user",
+                subjectUserId: "user-1",
+                kind: "preference",
+                key: "preference.focus_routine",
+              },
+              to: {
+                scope: "user",
+                subjectUserId: "user-2",
+                kind: "fact",
+                key: "profile.playbook",
+              },
+              relation: "related_to",
+              confidence: 1,
+              evidenceMessageIds: ["graph-link"],
+            },
+          ],
+        }),
+      ).resolves.toBe(2);
+
+      const recalled = await memory.recall({
+        guildId: "guild-1",
+        channelId: "channel-1",
+        userId: "user-1",
+        query: "deep-focus blocks",
+        limit: 10,
+      });
+      expect(recalled.map((item) => item.id)).toContain(seed.id);
+      expect(recalled.map((item) => item.id)).toContain(project.id);
+      expect(recalled.map((item) => item.content)).not.toContain(
+        "Another member owns the cobalt playbook.",
+      );
+      expect(recalled.find((item) => item.id === project.id)).toMatchObject({
+        linkedFromMemoryId: seed.id,
+        linkRelation: "related_to",
+        linkConfidence: 0.94,
+        linkDirection: "outbound",
+      });
+
+      await memory.recordMessageDeletion({
+        discordMessageId: "graph-link",
+        guildId: "guild-1",
+        channelId: "channel-1",
+        actorUserId: "user-1",
+        deletedAt: new Date("2026-07-31T03:00:00.000Z"),
+      });
+      const afterRevocation = await memory.recall({
+        guildId: "guild-1",
+        channelId: "channel-1",
+        userId: "user-1",
+        query: "deep-focus blocks",
+        limit: 10,
+      });
+      expect(afterRevocation.map((item) => item.id)).toContain(seed.id);
+      expect(afterRevocation.map((item) => item.id)).not.toContain(project.id);
+      const linkAudit = await pool.query<{ count: string }>(
+        "SELECT count(*) FROM memory_link_revisions",
+      );
+      expect(linkAudit.rows[0]?.count).toBe("2");
+    });
+
+    test("revokes stale derived memory when supporting Discord evidence is edited or deleted", async () => {
+      await memory.recordMessage({
+        discordMessageId: "mutable-evidence",
+        guildId: "guild-1",
+        channelId: "channel-1",
+        userId: "user-1",
+        username: "Kira",
+        role: "user",
+        content: "Atlas uses MongoDB.",
+      });
+      const saved = await memory.upsertMemories({
+        guildId: "guild-1",
+        channelId: "channel-1",
+        source: "extracted",
+        candidates: [
+          {
+            scope: "guild",
+            kind: "decision",
+            key: "project.atlas.database",
+            content: "Atlas uses MongoDB.",
+            importance: 9,
+            confidence: 0.95,
+            evidenceMessageIds: ["mutable-evidence"],
+            reason: "Initial message.",
+          },
+        ],
+      });
+      await memory.recordMessageEdit({
+        discordMessageId: "mutable-evidence",
+        guildId: "guild-1",
+        channelId: "channel-1",
+        actorUserId: "user-1",
+        replacementContent: "Atlas uses PostgreSQL.",
+        editedAt: new Date("2026-07-31T02:00:00.000Z"),
+      });
+      expect(
+        (
+          await memory.recall({
+            guildId: "guild-1",
+            channelId: "channel-1",
+            userId: "user-1",
+            query: "Atlas MongoDB",
+            limit: 10,
+          })
+        ).map((item) => item.id),
+      ).not.toContain(saved[0]?.id);
+
+      const replacement = await memory.upsertMemories({
+        guildId: "guild-1",
+        channelId: "channel-1",
+        source: "extracted",
+        candidates: [
+          {
+            scope: "guild",
+            kind: "decision",
+            key: "project.atlas.database",
+            content: "Atlas uses PostgreSQL.",
+            importance: 9,
+            confidence: 0.98,
+            evidenceMessageIds: ["mutable-evidence"],
+            reason: "Edited message.",
+          },
+        ],
+      });
+      await memory.recordMessageDeletion({
+        discordMessageId: "mutable-evidence",
+        guildId: "guild-1",
+        channelId: "channel-1",
+        actorUserId: "user-1",
+        deletedAt: new Date("2026-07-31T02:05:00.000Z"),
+      });
+      expect(
+        (
+          await memory.recall({
+            guildId: "guild-1",
+            channelId: "channel-1",
+            userId: "user-1",
+            query: "Atlas PostgreSQL",
+            limit: 10,
+          })
+        ).map((item) => item.id),
+      ).not.toContain(replacement[0]?.id);
+      expect(await memory.recent("guild-1", "channel-1", 10)).toEqual([]);
+    });
+
+    test("claims Discord side effects once and replays their durable receipt", async () => {
+      const identity = {
+        requestDiscordMessageId: "request-1",
+        toolName: "discord_send_message",
+        argumentsHash: "a".repeat(64),
+        runId: "00000000-0000-4000-8000-000000000001",
+        callId: "call-1",
+      };
+      await expect(memory.claimAgentAction(identity)).resolves.toEqual({
+        status: "execute",
+      });
+      await expect(memory.claimAgentAction(identity)).resolves.toEqual({
+        status: "in_progress",
+      });
+      await memory.completeAgentAction({
+        requestDiscordMessageId: identity.requestDiscordMessageId,
+        toolName: identity.toolName,
+        argumentsHash: identity.argumentsHash,
+        result: { messageId: "sent-1", channelId: "channel-1" },
+      });
+      await expect(memory.claimAgentAction(identity)).resolves.toEqual({
+        status: "completed",
+        result: { messageId: "sent-1", channelId: "channel-1" },
+      });
+    });
   },
 );
+
+function unitVector(index: number): number[] {
+  return Array.from({ length: 1_024 }, (_, current) =>
+    current === index ? 1 : 0,
+  );
+}

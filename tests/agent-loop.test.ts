@@ -5,6 +5,7 @@ import {
   AgentLoop,
   AgentLoopError,
   AgentToolError,
+  serializeToolOutput,
 } from "../src/agent/loop.ts";
 import type { AgentTool } from "../src/agent/types.ts";
 import type {
@@ -281,5 +282,157 @@ describe("bounded agent loop", () => {
       expect(error).toBeInstanceOf(AgentLoopError);
       expect((error as AgentLoopError).code).toBe("iteration_limit");
     }
+  });
+
+  test("preserves write barriers while parallelizing adjacent reads", async () => {
+    let firstReadsCompleted = 0;
+    let writeCompleted = false;
+    const readTool: AgentTool<TestContext, { stage: "before" | "after" }> = {
+      name: "read",
+      description: "Read around a write barrier",
+      parameters: { type: "object" },
+      schema: z.object({ stage: z.enum(["before", "after"]) }),
+      effect: "read",
+      parallelSafe: true,
+      async execute(arguments_, context) {
+        if (arguments_.stage === "before") {
+          await Bun.sleep(10);
+          firstReadsCompleted += 1;
+        } else {
+          expect(writeCompleted).toBeTrue();
+        }
+        context.events.push(`read:${arguments_.stage}`);
+        return {};
+      },
+    };
+    const writeTool: AgentTool<TestContext, Record<string, never>> = {
+      name: "write",
+      description: "Write between read batches",
+      parameters: { type: "object" },
+      schema: z.object({}).strict(),
+      effect: "write",
+      parallelSafe: false,
+      async execute(_arguments, context) {
+        expect(firstReadsCompleted).toBe(2);
+        writeCompleted = true;
+        context.events.push("write");
+        return {};
+      },
+    };
+    const client = new ScriptedAgentClient([
+      toolTurn([
+        { id: "read-1", name: "read", arguments: '{"stage":"before"}' },
+        { id: "read-2", name: "read", arguments: '{"stage":"before"}' },
+        { id: "write", name: "write", arguments: "{}" },
+        { id: "read-3", name: "read", arguments: '{"stage":"after"}' },
+        { id: "read-4", name: "read", arguments: '{"stage":"after"}' },
+      ]),
+      finalTurn("ordered"),
+    ]);
+    const context = { events: [] as string[] };
+    const result = await new AgentLoop({
+      client,
+      model: "test-model",
+      tools: [readTool, writeTool],
+      logger: pino({ level: "silent" }),
+    }).run({
+      messages: [{ role: "user", content: "read, write, then read" }],
+      context,
+    });
+
+    expect(result.content).toBe("ordered");
+    expect(context.events.indexOf("write")).toBe(2);
+    expect(context.events.slice(3)).toEqual(["read:after", "read:after"]);
+  });
+
+  test("enforces a tool timeout even when the tool ignores AbortSignal", async () => {
+    const hanging: AgentTool<TestContext, Record<string, never>> = {
+      name: "hang",
+      description: "Never resolves",
+      parameters: { type: "object" },
+      schema: z.object({}).strict(),
+      effect: "read",
+      parallelSafe: true,
+      async execute() {
+        return await new Promise<Record<string, never>>(() => undefined);
+      },
+    };
+    const client = new ScriptedAgentClient([
+      toolTurn([{ id: "hang", name: "hang", arguments: "{}" }]),
+      finalTurn("recovered"),
+    ]);
+    const startedAt = performance.now();
+    const result = await new AgentLoop({
+      client,
+      model: "test-model",
+      tools: [hanging],
+      logger: pino({ level: "silent" }),
+      options: { toolTimeoutMs: 20, runTimeoutMs: 1_000 },
+    }).run({
+      messages: [{ role: "user", content: "hang" }],
+      context: { events: [] },
+    });
+
+    expect(performance.now() - startedAt).toBeLessThan(300);
+    expect(result.executions[0]?.errorCode).toBe("tool_timeout");
+    expect(result.content).toBe("recovered");
+  });
+
+  test("enforces the whole-run timeout across a non-cooperative model call", async () => {
+    let suppliedSignal: AbortSignal | undefined;
+    const client: AgentCompletionClient = {
+      async complete() {
+        throw new Error("not expected");
+      },
+      async completeToolTurn(_messages, _model, _tools, signal) {
+        suppliedSignal = signal;
+        return await new Promise<AgentTurnResult>(() => undefined);
+      },
+    };
+    const loop = new AgentLoop({
+      client,
+      model: "test-model",
+      tools: [],
+      logger: pino({ level: "silent" }),
+      options: { runTimeoutMs: 20 },
+    });
+    const startedAt = performance.now();
+    await expect(
+      loop.run({
+        messages: [{ role: "user", content: "wait forever" }],
+        context: { events: [] },
+      }),
+    ).rejects.toMatchObject({ code: "run_timeout" });
+    expect(performance.now() - startedAt).toBeLessThan(300);
+    expect(suppliedSignal?.aborted).toBeTrue();
+  });
+
+  test("does not let observer failures break a successful run", async () => {
+    const client = new ScriptedAgentClient([finalTurn("done")]);
+    const result = await new AgentLoop({
+      client,
+      model: "test-model",
+      tools: [],
+      logger: pino({ level: "silent" }),
+      observer: {
+        modelTurn() {
+          throw new Error("telemetry unavailable");
+        },
+      },
+    }).run({
+      messages: [{ role: "user", content: "finish" }],
+      context: { events: [] },
+    });
+    expect(result.content).toBe("done");
+  });
+
+  test("preserves failed status when truncating oversized tool output", () => {
+    const output = JSON.parse(
+      serializeToolOutput(
+        { ok: false, error: { code: "huge", message: "x".repeat(500) } },
+        120,
+      ),
+    );
+    expect(output).toMatchObject({ ok: false, truncated: true });
   });
 });

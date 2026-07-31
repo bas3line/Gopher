@@ -26,6 +26,31 @@ export const memorySourceSchema = z.enum([
 ]);
 export type MemorySource = z.infer<typeof memorySourceSchema>;
 
+export const memoryRelationSchema = z.enum([
+  "supports",
+  "contradicts",
+  "updates",
+  "part_of",
+  "caused_by",
+  "related_to",
+]);
+export type MemoryRelation = z.infer<typeof memoryRelationSchema>;
+
+export interface MemoryIdentity {
+  scope: MemoryScope;
+  subjectUserId?: string;
+  kind: MemoryKind;
+  key: string;
+}
+
+export interface MemoryRelationCandidate {
+  from: MemoryIdentity;
+  to: MemoryIdentity;
+  relation: MemoryRelation;
+  confidence: number;
+  evidenceMessageIds: string[];
+}
+
 export interface DurableMemory {
   id: number;
   guildId: string;
@@ -49,6 +74,13 @@ export interface DurableMemory {
   createdAt: Date;
   updatedAt: Date;
   score: number;
+  semanticSimilarity?: number;
+  embeddingModel?: string;
+  embeddedAt?: Date;
+  linkedFromMemoryId?: number;
+  linkRelation?: MemoryRelation;
+  linkConfidence?: number;
+  linkDirection?: "outbound" | "inbound";
 }
 export interface MemoryCandidate {
   scope: MemoryScope;
@@ -95,6 +127,17 @@ export interface MemoryIngestionBatch {
   knownUserIds: string[];
   checkpoint: number;
   reachedTarget: boolean;
+}
+
+export interface MemoryEmbeddingJob {
+  memoryItemId: number;
+  guildId: string;
+  channelId: string;
+  memoryVersion: number;
+  kind: MemoryKind;
+  key: string;
+  content: string;
+  attempts: number;
 }
 
 export interface DiscordEventInput {

@@ -7,9 +7,12 @@ import type {
 import { normalizeMemoryKey } from "./store.ts";
 import {
   memoryKindSchema,
+  memoryRelationSchema,
   memoryScopeSchema,
   type DurableMemory,
   type MemoryCandidate,
+  type MemoryIdentity,
+  type MemoryRelationCandidate,
 } from "./types.ts";
 import type { StoredMessage } from "../types.ts";
 
@@ -28,9 +31,29 @@ const candidateSchema = z
   })
   .strict();
 
+const identitySchema = z
+  .object({
+    scope: memoryScopeSchema,
+    subjectUserId: z.string().min(1).max(40).optional(),
+    kind: memoryKindSchema,
+    key: z.string().min(2).max(120),
+  })
+  .strict();
+
+const relationSchema = z
+  .object({
+    from: identitySchema,
+    to: identitySchema,
+    relation: memoryRelationSchema,
+    confidence: z.number().min(0.6).max(1),
+    evidenceMessageIds: z.array(z.string().min(1).max(100)).min(1).max(8),
+  })
+  .strict();
+
 const extractionSchema = z
   .object({
     memories: z.array(candidateSchema).max(24),
+    relations: z.array(relationSchema).max(32).default([]),
   })
   .strict();
 
@@ -54,6 +77,7 @@ export interface MemoryExtractionInput {
 
 export interface MemoryExtractionResult {
   candidates: MemoryCandidate[];
+  relations: MemoryRelationCandidate[];
   promptTokens?: number;
   completionTokens?: number;
 }
@@ -87,13 +111,15 @@ export class MemoryExtractor {
         "provider_failure",
       );
     }
-    const candidates = parseMemoryExtraction(
+    const parsed = parseMemoryExtraction(
       completion.content,
       input.messages,
       input.knownUserIds,
+      input.existing,
     );
     return {
-      candidates,
+      candidates: parsed.candidates,
+      relations: parsed.relations,
       ...(completion.promptTokens !== undefined
         ? { promptTokens: completion.promptTokens }
         : {}),
@@ -133,7 +159,7 @@ export function buildMemoryExtractionMessages(
       role: "system",
       content: `
 You are the durable-memory consolidation stage for a Discord agent.
-Return one strict JSON object: {"memories":[...]} and no markdown.
+Return one strict JSON object: {"memories":[...],"relations":[...]} and no markdown.
 
 Extract only durable information that will materially improve a future conversation:
 - stable user profile facts and preferences
@@ -153,7 +179,15 @@ Reuse an existing key when new evidence confirms or corrects it. A changed value
 content must be concise, standalone, attributed when useful, and must not claim more certainty than the evidence.
 importance is 1-10. confidence is 0-1. Use ttlDays only for genuinely temporary facts.
 evidenceMessageIds must contain only transcript message IDs that directly support the memory.
-If nothing is durable, return {"memories":[]}.
+Relations are directed links between exact memory identities. Add one only when a transcript message directly supports the relationship and both endpoints are either in memories or existingMemories:
+- supports: from is evidence for to
+- contradicts: from conflicts with to
+- updates: from is a newer replacement or refinement of to
+- part_of: from is a component of to
+- caused_by: from happened because of to
+- related_to: a meaningful durable connection that does not fit above
+Do not infer a relation from shared words alone. Use confidence >= 0.6 and direct transcript evidence.
+If nothing is durable, return {"memories":[],"relations":[]}.
       `.trim(),
     },
     {
@@ -178,6 +212,26 @@ If nothing is durable, return {"memories":[]}.
               reason: "why this is worth retaining or what it updates",
             },
           ],
+          relations: [
+            {
+              from: {
+                scope: "user | channel | guild",
+                subjectUserId: "required only for user scope",
+                kind: "memory kind",
+                key: "exact stable key",
+              },
+              to: {
+                scope: "user | channel | guild",
+                subjectUserId: "required only for user scope",
+                kind: "memory kind",
+                key: "exact stable key",
+              },
+              relation:
+                "supports | contradicts | updates | part_of | caused_by | related_to",
+              confidence: "number 0.6-1",
+              evidenceMessageIds: ["directly supporting transcript IDs"],
+            },
+          ],
         },
       }),
     },
@@ -188,7 +242,11 @@ export function parseMemoryExtraction(
   input: string,
   transcript: StoredMessage[],
   knownUserIds: string[],
-): MemoryCandidate[] {
+  existing: DurableMemory[] = [],
+): {
+  candidates: MemoryCandidate[];
+  relations: MemoryRelationCandidate[];
+} {
   const json = extractJsonObject(input);
   let decoded: unknown;
   try {
@@ -269,7 +327,105 @@ export function parseMemoryExtraction(
       candidates.set(identity, normalized);
     }
   }
-  return [...candidates.values()].slice(0, 20);
+  const normalizedCandidates = [...candidates.values()].slice(0, 20);
+  const allowedIdentities = new Set(
+    [
+      ...existing.map(memoryIdentityFromDurable),
+      ...normalizedCandidates.map(memoryIdentityFromCandidate),
+    ].map(memoryIdentityKey),
+  );
+  const relations = new Map<string, MemoryRelationCandidate>();
+  for (const relation of parsed.data.relations) {
+    const from = normalizeMemoryIdentity(relation.from, validUsers);
+    const to = normalizeMemoryIdentity(relation.to, validUsers);
+    if (!from || !to) continue;
+    const fromKey = memoryIdentityKey(from);
+    const toKey = memoryIdentityKey(to);
+    if (
+      fromKey === toKey ||
+      !allowedIdentities.has(fromKey) ||
+      !allowedIdentities.has(toKey) ||
+      relation.evidenceMessageIds.some(
+        (messageId) => !validEvidence.has(messageId),
+      )
+    ) {
+      continue;
+    }
+    const normalized: MemoryRelationCandidate = {
+      from,
+      to,
+      relation: relation.relation,
+      confidence: relation.confidence,
+      evidenceMessageIds: [...new Set(relation.evidenceMessageIds)],
+    };
+    const identity = `${fromKey}>${normalized.relation}>${toKey}`;
+    const previous = relations.get(identity);
+    if (!previous || normalized.confidence > previous.confidence) {
+      relations.set(identity, normalized);
+    }
+  }
+  return {
+    candidates: normalizedCandidates,
+    relations: [...relations.values()].slice(0, 24),
+  };
+}
+
+function normalizeMemoryIdentity(
+  input: z.infer<typeof identitySchema>,
+  validUsers: Set<string>,
+): MemoryIdentity | undefined {
+  if (
+    input.scope === "user"
+      ? !input.subjectUserId || !validUsers.has(input.subjectUserId)
+      : input.subjectUserId !== undefined
+  ) {
+    return undefined;
+  }
+  let key: string;
+  try {
+    key = normalizeMemoryKey(input.key);
+  } catch {
+    return undefined;
+  }
+  return {
+    scope: input.scope,
+    ...(input.scope === "user" && input.subjectUserId
+      ? { subjectUserId: input.subjectUserId }
+      : {}),
+    kind: input.kind,
+    key,
+  };
+}
+
+function memoryIdentityFromCandidate(candidate: MemoryCandidate): MemoryIdentity {
+  return {
+    scope: candidate.scope,
+    ...(candidate.subjectUserId
+      ? { subjectUserId: candidate.subjectUserId }
+      : {}),
+    kind: candidate.kind,
+    key: candidate.key,
+  };
+}
+
+function memoryIdentityFromDurable(memory: DurableMemory): MemoryIdentity {
+  return {
+    scope: memory.scope,
+    ...(memory.subjectUserId
+      ? { subjectUserId: memory.subjectUserId }
+      : {}),
+    kind: memory.kind,
+    key: memory.key,
+  };
+}
+
+function memoryIdentityKey(identity: MemoryIdentity): string {
+  return [
+    identity.scope,
+    identity.subjectUserId ?? "",
+    identity.kind,
+    identity.key,
+  ].join(":");
 }
 
 export function containsSecret(input: string): boolean {

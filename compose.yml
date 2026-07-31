@@ -2,7 +2,7 @@ name: go-senior-discord-bot
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: pgvector/pgvector:0.8.5-pg17
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-go_senior_bot}

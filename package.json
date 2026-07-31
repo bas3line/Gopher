@@ -11,6 +11,8 @@
     "test": "bun test",
     "test:integration": "RUN_INTEGRATION_TESTS=1 bun test tests/integration",
     "smoke:provider": "RUN_LIVE_PROVIDER_TEST=1 bun test ./tests/live/provider.live.test.ts",
+    "smoke:agent": "RUN_LIVE_AGENT_TEST=1 bun test ./tests/live/agent-provider.live.test.ts",
+    "smoke:embeddings": "RUN_LIVE_EMBEDDING_TEST=1 bun test ./tests/live/embeddings.live.test.ts",
     "smoke:firecrawl": "RUN_LIVE_FIRECRAWL_TEST=1 bun test ./tests/live/firecrawl.live.test.ts",
     "smoke:voice": "RUN_LIVE_VOICE_TEST=1 bun test ./tests/live/voice.live.test.ts",
     "smoke:voice-fallback": "RUN_LIVE_CLOUDFLARE_VOICE_TEST=1 bun test ./tests/live/cloudflare-voice.live.test.ts"

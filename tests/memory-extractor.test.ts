@@ -90,18 +90,19 @@ describe("durable memory extraction", () => {
       ["user-1"],
     );
 
-    expect(result).toHaveLength(2);
-    expect(result[0]).toMatchObject({
+    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates[0]).toMatchObject({
       scope: "user",
       subjectUserId: "user-1",
       key: "preference.runtime",
       content: "Kira prefers Bun for TypeScript projects.",
     });
-    expect(result[1]).toMatchObject({
+    expect(result.candidates[1]).toMatchObject({
       scope: "guild",
       kind: "decision",
       key: "project.atlas.database",
     });
+    expect(result.relations).toEqual([]);
   });
 
   test("drops ungrounded users, invented evidence, and credential material", () => {
@@ -145,9 +146,106 @@ describe("durable memory extraction", () => {
       ["user-1"],
     );
 
-    expect(result).toEqual([]);
+    expect(result).toEqual({ candidates: [], relations: [] });
     expect(containsSecret("password: supersecretvalue")).toBeTrue();
     expect(containsSecret("Kira prefers dark mode")).toBeFalse();
+  });
+
+  test("accepts only grounded links between exact visible memory identities", () => {
+    const result = parseMemoryExtraction(
+      JSON.stringify({
+        memories: [
+          {
+            scope: "channel",
+            kind: "project",
+            key: "project.atlas",
+            content: "The channel is building Project Atlas.",
+            importance: 9,
+            confidence: 0.95,
+            evidenceMessageIds: ["discord-10"],
+            reason: "Ongoing project context.",
+          },
+          {
+            scope: "guild",
+            kind: "decision",
+            key: "project.atlas.database",
+            content: "Project Atlas uses PostgreSQL.",
+            importance: 9,
+            confidence: 0.92,
+            evidenceMessageIds: ["discord-10"],
+            reason: "A durable project decision.",
+          },
+        ],
+        relations: [
+          {
+            from: {
+              scope: "guild",
+              kind: "decision",
+              key: "Project / Atlas / Database",
+            },
+            to: {
+              scope: "channel",
+              kind: "project",
+              key: "project.atlas",
+            },
+            relation: "part_of",
+            confidence: 0.9,
+            evidenceMessageIds: ["discord-10"],
+          },
+          {
+            from: {
+              scope: "user",
+              subjectUserId: "stranger",
+              kind: "profile",
+              key: "profile.name",
+            },
+            to: {
+              scope: "channel",
+              kind: "project",
+              key: "project.atlas",
+            },
+            relation: "related_to",
+            confidence: 0.9,
+            evidenceMessageIds: ["discord-10"],
+          },
+          {
+            from: {
+              scope: "channel",
+              kind: "project",
+              key: "project.atlas",
+            },
+            to: {
+              scope: "guild",
+              kind: "decision",
+              key: "missing.identity",
+            },
+            relation: "supports",
+            confidence: 0.9,
+            evidenceMessageIds: ["discord-10"],
+          },
+        ],
+      }),
+      transcript,
+      ["user-1"],
+    );
+
+    expect(result.relations).toEqual([
+      {
+        from: {
+          scope: "guild",
+          kind: "decision",
+          key: "project.atlas.database",
+        },
+        to: {
+          scope: "channel",
+          kind: "project",
+          key: "project.atlas",
+        },
+        relation: "part_of",
+        confidence: 0.9,
+        evidenceMessageIds: ["discord-10"],
+      },
+    ]);
   });
 
   test("treats transcript text as untrusted data and bounds prompt payloads", () => {
@@ -213,6 +311,7 @@ describe("durable memory extraction", () => {
       }),
     ).resolves.toMatchObject({
       candidates: [{ key: "preference.runtime" }],
+      relations: [],
       promptTokens: 120,
       completionTokens: 40,
     });
