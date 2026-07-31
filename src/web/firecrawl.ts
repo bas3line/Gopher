@@ -3,6 +3,7 @@ import type { Logger } from "../logger.ts";
 import type { WebSource } from "../types.ts";
 
 type FirecrawlItem = SearchResultWeb | SearchResultNews | Document;
+export type WebResearchClient = Pick<Firecrawl, "scrape" | "search">;
 
 export class WebResearchError extends Error {
   constructor(message: string) {
@@ -12,14 +13,17 @@ export class WebResearchError extends Error {
 }
 
 export class WebResearch {
-  private readonly client?: Firecrawl;
+  private readonly client?: WebResearchClient;
 
   constructor(
     apiKey: string | undefined,
     private readonly maxResults: number,
     private readonly logger: Logger,
+    client?: WebResearchClient,
   ) {
-    if (apiKey) {
+    if (client) {
+      this.client = client;
+    } else if (apiKey) {
       this.client = new Firecrawl({
         apiKey,
         timeoutMs: 35_000,
@@ -46,6 +50,41 @@ export class WebResearch {
         1,
         Math.min(options.limit ?? this.maxResults, this.maxResults),
       );
+      const explicitUrls = explicitHttpUrls(query).slice(0, limit);
+      if (explicitUrls.length > 0) {
+        const results = await Promise.allSettled(
+          explicitUrls.map((url) =>
+            this.client!.scrape(url, {
+              formats: ["markdown"],
+              onlyMainContent: true,
+              maxAge: 3_600_000,
+            }),
+          ),
+        );
+        const directSources: WebSource[] = [];
+        for (const [index, result] of results.entries()) {
+          if (result.status === "rejected") {
+            this.logger.warn(
+              {
+                hostname: new URL(explicitUrls[index]!).hostname,
+                err:
+                  result.reason instanceof Error
+                    ? {
+                        name: result.reason.name,
+                        message: result.reason.message,
+                      }
+                    : "unknown",
+              },
+              "Firecrawl direct URL scrape failed",
+            );
+            continue;
+          }
+          const normalized = normalizeFirecrawlItem(result.value);
+          if (normalized) directSources.push(normalized);
+        }
+        if (directSources.length > 0) return directSources;
+      }
+
       const result = await this.client.search(query, {
         limit,
         sources: ["web", "news"],
@@ -79,6 +118,33 @@ export class WebResearch {
       throw new WebResearchError("Firecrawl web search failed");
     }
   }
+}
+
+export function explicitHttpUrls(input: string): string[] {
+  const matches = input.match(/https?:\/\/[^\s<>"'`]+/gi) ?? [];
+  const seen = new Set<string>();
+  const urls: string[] = [];
+  for (const match of matches) {
+    const candidate = match.replace(/[\])},.!?;:]+$/g, "");
+    try {
+      const url = new URL(candidate);
+      if (
+        (url.protocol !== "https:" && url.protocol !== "http:") ||
+        url.username ||
+        url.password
+      ) {
+        continue;
+      }
+      url.hash = "";
+      const normalized = url.toString();
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      urls.push(normalized);
+    } catch {
+      continue;
+    }
+  }
+  return urls;
 }
 
 export function normalizeFirecrawlItem(item: FirecrawlItem): WebSource | undefined {
