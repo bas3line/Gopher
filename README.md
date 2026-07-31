@@ -54,6 +54,11 @@ Open `.env` and set:
 Vision, web research, and voice are optional. Add their keys only if you want those features.
 Never commit `.env`.
 
+This deployment is intentionally restricted to Discord guild `1515356172092178512`.
+At startup it leaves every other guild, and a `guildCreate` listener immediately leaves any
+newly joined guild outside that allowlist. Guild events from outside the allowlist are ignored
+while the leave request is in flight.
+
 For semantic memory, configure `EMBEDDING_API_URL`, `EMBEDDING_API_KEY`, and `EMBEDDING_MODEL`
 together. OpenAI's `text-embedding-3-large` with `EMBEDDING_DIMENSIONS=1024` is the reference
 configuration. Without it, all raw/typed memory still works and recall falls back to PostgreSQL

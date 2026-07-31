@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ALLOWED_GUILD_ID } from "./discord/guild-policy.ts";
 
 const optionalTrimmed = z
   .string()
@@ -11,7 +12,7 @@ const configSchema = z
       .enum(["development", "test", "production"])
       .default("development"),
     DISCORD_TOKEN: optionalTrimmed,
-    DISCORD_GUILD_ID: optionalTrimmed,
+    DISCORD_GUILD_ID: z.literal(ALLOWED_GUILD_ID).default(ALLOWED_GUILD_ID),
     BOT_OWNER_USER_IDS: z
       .string()
       .trim()
@@ -287,7 +288,7 @@ const configSchema = z
 export interface AppConfig {
   nodeEnv: "development" | "test" | "production";
   discordToken?: string;
-  discordGuildId?: string;
+  discordGuildId: typeof ALLOWED_GUILD_ID;
   ownerUserIds: readonly string[];
   text: {
     endpoint: string;
@@ -382,9 +383,7 @@ export function loadConfig(
   return {
     nodeEnv: value.NODE_ENV,
     ...(value.DISCORD_TOKEN ? { discordToken: value.DISCORD_TOKEN } : {}),
-    ...(value.DISCORD_GUILD_ID
-      ? { discordGuildId: value.DISCORD_GUILD_ID }
-      : {}),
+    discordGuildId: value.DISCORD_GUILD_ID,
     ownerUserIds: value.BOT_OWNER_USER_IDS
       ? [...new Set(value.BOT_OWNER_USER_IDS.split(",").map((id) => id.trim()))]
       : [],

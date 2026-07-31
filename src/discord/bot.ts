@@ -90,6 +90,12 @@ import {
   memoryKindSchema,
   memoryScopeSchema,
 } from "../memory/types.ts";
+import {
+  ALLOWED_GUILD_ID,
+  enforceGuildAllowlist,
+  leaveIfDisallowedGuild,
+  shouldHandleGuildContext,
+} from "./guild-allowlist.ts";
 
 interface AnswerInput {
   discordMessageId: string;
@@ -221,6 +227,24 @@ export class DiscordBot {
         },
         "Discord bot ready",
       );
+      const allowlistResult = await enforceGuildAllowlist(
+        readyClient.guilds.cache.values(),
+      );
+      for (const failure of allowlistResult.failures) {
+        this.dependencies.logger.error(
+          { err: failure.error, guildId: failure.guildId },
+          "failed to leave a disallowed Discord guild",
+        );
+      }
+      this.dependencies.logger.info(
+        {
+          allowedGuildId: ALLOWED_GUILD_ID,
+          allowedGuildPresent: allowlistResult.allowedGuildPresent,
+          leftGuildIds: allowlistResult.leftGuildIds,
+          failedGuilds: allowlistResult.failures.length,
+        },
+        "enforced Discord guild allowlist at startup",
+      );
       if (this.music) {
         try {
           await this.music.start();
@@ -238,22 +262,24 @@ export class DiscordBot {
           "failed to register Discord commands",
         );
       }
-      await this.refreshServerEmojis(readyClient.guilds.cache.values());
+      const allowedGuild = readyClient.guilds.cache.get(ALLOWED_GUILD_ID);
+      await this.refreshServerEmojis(allowedGuild ? [allowedGuild] : []);
     });
     this.client.on(Events.GuildCreate, (guild) => {
-      void this.registerGuildCommands(guild).catch((error) => {
+      void this.handleGuildCreate(guild).catch((error) => {
         this.dependencies.logger.error(
           { err: error, guildId: guild.id },
-          "failed to register commands in a new guild",
+          "failed to enforce Discord guild allowlist for a new guild",
         );
       });
-      void this.refreshServerEmojis([guild]);
     });
 
     this.client.on(Events.MessageCreate, (message) => {
+      if (!shouldHandleGuildContext(message.guildId)) return;
       void this.handleMessage(message);
     });
     this.client.on(Events.MessageUpdate, (_previous, updated) => {
+      if (!shouldHandleGuildContext(updated.guildId)) return;
       void (async () => {
         const message = updated.partial ? await updated.fetch() : updated;
         await this.handleMessageUpdate(message);
@@ -265,6 +291,7 @@ export class DiscordBot {
       });
     });
     this.client.on(Events.MessageDelete, (message) => {
+      if (!shouldHandleGuildContext(message.guildId)) return;
       void this.handleMessageDelete(message).catch((error) => {
         this.dependencies.logger.warn(
           { err: error, messageId: message.id },
@@ -273,6 +300,7 @@ export class DiscordBot {
       });
     });
     this.client.on(Events.MessageReactionAdd, (reaction, user) => {
+      if (!shouldHandleGuildContext(reaction.message.guildId)) return;
       void this.handleReactionEvent("add", reaction, user).catch((error) => {
         this.dependencies.logger.debug(
           { err: error, messageId: reaction.message.id },
@@ -281,6 +309,7 @@ export class DiscordBot {
       });
     });
     this.client.on(Events.MessageReactionRemove, (reaction, user) => {
+      if (!shouldHandleGuildContext(reaction.message.guildId)) return;
       void this.handleReactionEvent("remove", reaction, user).catch((error) => {
         this.dependencies.logger.debug(
           { err: error, messageId: reaction.message.id },
@@ -289,6 +318,7 @@ export class DiscordBot {
       });
     });
     this.client.on(Events.ThreadCreate, (thread) => {
+      if (!shouldHandleGuildContext(thread.guildId)) return;
       void this.handleThreadEvent("create", thread).catch((error) => {
         this.dependencies.logger.debug(
           { err: error, threadId: thread.id },
@@ -297,6 +327,7 @@ export class DiscordBot {
       });
     });
     this.client.on(Events.ThreadUpdate, (_previous, updated) => {
+      if (!shouldHandleGuildContext(updated.guildId)) return;
       void this.handleThreadEvent("update", updated).catch((error) => {
         this.dependencies.logger.debug(
           { err: error, threadId: updated.id },
@@ -305,6 +336,7 @@ export class DiscordBot {
       });
     });
     this.client.on(Events.InteractionCreate, (interaction) => {
+      if (!shouldHandleGuildContext(interaction.guildId)) return;
       void this.handleInteraction(interaction).catch((error) => {
         this.dependencies.logger.error(
           { err: error, interactionId: interaction.id },
@@ -355,34 +387,27 @@ export class DiscordBot {
     // guild makes Discord clients show duplicate command entries.
     await this.client.application.commands.set([]);
 
-    const guildIds = new Set(this.client.guilds.cache.keys());
-    if (this.dependencies.config.discordGuildId) {
-      guildIds.add(this.dependencies.config.discordGuildId);
-    }
-    const results = await Promise.allSettled(
-      [...guildIds].map(async (guildId) => {
-        const guild = await this.client.guilds.fetch(guildId);
-        await this.registerGuildCommands(guild);
-        return guildId;
-      }),
-    );
-    const failures = results.filter(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
+    const guild = await this.client.guilds.fetch(ALLOWED_GUILD_ID);
+    await this.registerGuildCommands(guild);
     this.dependencies.logger.info(
       {
         globalCommandsCleared: true,
-        guilds: results.length - failures.length,
-        failedGuilds: failures.length,
+        guildId: ALLOWED_GUILD_ID,
       },
-      "refreshed Discord commands once per connected guild",
+      "refreshed Discord commands for the allowed guild",
     );
-    if (failures.length > 0) {
-      throw new AggregateError(
-        failures.map((failure) => failure.reason),
-        `failed to refresh commands in ${failures.length} guild(s)`,
+  }
+
+  private async handleGuildCreate(guild: Guild): Promise<void> {
+    if (await leaveIfDisallowedGuild(guild)) {
+      this.dependencies.logger.warn(
+        { guildId: guild.id, allowedGuildId: ALLOWED_GUILD_ID },
+        "left a newly joined guild outside the allowlist",
       );
+      return;
     }
+    await this.registerGuildCommands(guild);
+    await this.refreshServerEmojis([guild]);
   }
 
   private async registerGuildCommands(guild: Guild): Promise<void> {
