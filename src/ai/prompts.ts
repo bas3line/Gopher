@@ -68,6 +68,7 @@ export interface AnswerPromptInput {
   relevant: RelevantMemory[];
   webSources: WebSource[];
   imageUrls?: string[];
+  uncaptionedImage?: boolean;
   serverEmojis?: ServerEmoji[];
   isOwner?: boolean;
   runtimeCapabilities?: RuntimeCapabilities;
@@ -253,6 +254,10 @@ export function buildAnswerMessages(input: AnswerPromptInput): ChatMessage[] {
 
   const messages: ChatMessage[] = [
     { role: "system", content: persona },
+    ...buildImageResponseContext(
+      input.imageUrls?.length ?? 0,
+      input.uncaptionedImage ?? false,
+    ),
     ...buildOwnerContext(input.isOwner),
     ...buildRuntimeCapabilitiesContext(input.runtimeCapabilities),
     ...buildAgentRuntimeContext(input.agentRuntime),
@@ -306,6 +311,26 @@ export function buildAnswerMessages(input: AnswerPromptInput): ChatMessage[] {
   }
 
   return messages;
+}
+
+function buildImageResponseContext(
+  imageCount: number,
+  uncaptionedImage: boolean,
+): ChatMessage[] {
+  if (imageCount === 0) return [];
+  return [
+    {
+      role: "system",
+      content: `
+IMAGE_RESPONSE_POLICY (authoritative):
+- Attached images are visual context, not an automatic request for OCR or a field-by-field inventory.
+- If the current user explicitly asks you to read, transcribe, extract, identify, list, summarize, or describe something in the image, do that accurately.
+- Otherwise respond to the meaning and social moment. Mention visible text only when it supports the actual reply; never dump prices, dates, order IDs, product options, or every visible field just because they appear.
+- For a purchase screenshot, react to the choice or value; for a meme, play along; for a chat screenshot, react to the exchange. Do not repeat private or transactional identifiers unless explicitly asked.
+${uncaptionedImage ? "- The user shared this image without a caption. Reply like a real Discord regular with one short, specific reaction, opinion, or joke about the most salient thing. Do not merely restate what the image says." : "- The user included a caption or request. Answer that request directly and use the image only as supporting evidence."}
+      `.trim(),
+    },
+  ];
 }
 
 function buildAgentRuntimeContext(

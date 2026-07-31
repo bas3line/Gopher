@@ -63,6 +63,17 @@ export function stripBotMention(content: string, botUserId: string): string {
     .trim();
 }
 
+export function withAttachmentFallback(
+  content: string,
+  hasImage: boolean,
+): { content: string; uncaptionedImage: boolean } {
+  const normalized = content.trim();
+  if (normalized) return { content: normalized, uncaptionedImage: false };
+  return hasImage
+    ? { content: "[shared an image]", uncaptionedImage: true }
+    : { content: "[non-text message]", uncaptionedImage: false };
+}
+
 export function needsWebSearch(content: string): boolean {
   return (
     /https?:\/\/[^\s<>]+/i.test(content) ||

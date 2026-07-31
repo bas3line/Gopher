@@ -13,6 +13,7 @@ import {
   voiceCapabilityStatusReply,
   wantsImageCard,
   wantsVoiceReply,
+  withAttachmentFallback,
 } from "../src/discord/router.ts";
 
 describe("Discord response routing", () => {
@@ -156,6 +157,21 @@ describe("Discord response routing", () => {
 
   test("strips both Discord mention syntaxes", () => {
     expect(stripBotMention("<@123> yo <@!123>", "123")).toBe("yo");
+  });
+
+  test("represents an uncaptioned image as a social share, not an OCR command", () => {
+    expect(withAttachmentFallback("", true)).toEqual({
+      content: "[shared an image]",
+      uncaptionedImage: true,
+    });
+    expect(withAttachmentFallback("what does this say?", true)).toEqual({
+      content: "what does this say?",
+      uncaptionedImage: false,
+    });
+    expect(withAttachmentFallback("", false)).toEqual({
+      content: "[non-text message]",
+      uncaptionedImage: false,
+    });
   });
 
   test("detects research and card intent", () => {

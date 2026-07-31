@@ -92,6 +92,30 @@ describe("capability grounding", () => {
     expect(system).not.toContain("short natural hindi");
   });
 
+  test("makes an uncaptioned image a natural social reaction instead of OCR", () => {
+    const messages = buildAnswerMessages({
+      username: "shubham",
+      question: "[shared an image]",
+      recent: [],
+      relevant: [],
+      webSources: [],
+      imageUrls: ["https://cdn.example/order.png"],
+      uncaptionedImage: true,
+    });
+    const system = messages
+      .filter((message) => message.role === "system")
+      .map((message) => message.content)
+      .join("\n");
+    const latest = messages.at(-1);
+
+    expect(system).toContain("not an automatic request for OCR");
+    expect(system).toContain("one short, specific reaction");
+    expect(system).toContain("Do not merely restate what the image says");
+    expect(system).toContain("Do not repeat private or transactional identifiers");
+    expect(JSON.stringify(latest)).toContain("shubham: [shared an image]");
+    expect(JSON.stringify(latest)).toContain("https://cdn.example/order.png");
+  });
+
   test("teaches the model autonomous multi-tool research and write boundaries", () => {
     const messages = buildAnswerMessages({
       username: "kira",

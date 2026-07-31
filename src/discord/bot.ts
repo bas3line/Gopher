@@ -74,6 +74,7 @@ import {
   isTechnicalRequest,
   needsWebSearch,
   stripBotMention,
+  withAttachmentFallback,
   voiceCapabilityStatusReply,
   wantsImageCard,
   wantsVoiceReply,
@@ -105,6 +106,7 @@ interface AnswerInput {
   username: string;
   question: string;
   imageUrls: string[];
+  uncaptionedImage?: boolean;
   forceWebSearch: boolean;
   forceCard: boolean;
   forceVoice: boolean;
@@ -426,12 +428,15 @@ export class DiscordBot {
       this.client.user
         ? stripBotMention(message.content, this.client.user.id)
         : message.content.trim();
+    const hasImage = [...message.attachments.values()].some((attachment) =>
+      attachment.contentType?.startsWith("image/"),
+    );
     await this.dependencies.memory.recordMessageEdit({
       discordMessageId: message.id,
       guildId,
       channelId: message.channelId,
       actorUserId: message.author.id,
-      replacementContent: content || "[non-text message]",
+      replacementContent: withAttachmentFallback(content, hasImage).content,
       editedAt: message.editedAt ?? new Date(),
     });
   }
@@ -535,11 +540,11 @@ export class DiscordBot {
       const imageUrls = attachments
         .filter((attachment) => attachment.contentType?.startsWith("image/"))
         .map((attachment) => attachment.url);
-      const cleanContent =
-        stripBotMention(message.content, this.client.user.id) ||
-        (imageUrls.length > 0
-          ? "Inspect the attached image."
-          : "[non-text message]");
+      const normalizedContent = withAttachmentFallback(
+        stripBotMention(message.content, this.client.user.id),
+        imageUrls.length > 0,
+      );
+      const cleanContent = normalizedContent.content;
 
       await this.dependencies.memory.recordMessage({
         discordMessageId: message.id,
@@ -645,11 +650,15 @@ export class DiscordBot {
               ...imageUrls,
               ...customEmojiImageUrls(cleanContent, serverEmojis),
             ].slice(0, 4),
+            uncaptionedImage: normalizedContent.uncaptionedImage,
             forceWebSearch: needsWebSearch(cleanContent),
             forceCard: false,
             forceVoice: wantsVoiceReply(cleanContent),
             ambient,
-            forceRecentContext: isReplyToBot || !message.guildId,
+            forceRecentContext:
+              isReplyToBot ||
+              !message.guildId ||
+              normalizedContent.uncaptionedImage,
             isOwner,
             isAdministrator:
               message.member?.permissions.has(
@@ -1090,13 +1099,14 @@ export class DiscordBot {
       !input.ambient &&
       (input.forceWebSearch || (!useAgent && needsWebSearch(input.question)));
     const casual =
-      !shouldSearch &&
-      !input.forceWebSearch &&
-      !useVision &&
-      !input.forceCard &&
-      !isAnswerRequest(input.question) &&
-      !isTechnicalRequest(input.question) &&
-      input.question.length <= 240;
+      (useVision && input.uncaptionedImage === true) ||
+      (!shouldSearch &&
+        !input.forceWebSearch &&
+        !useVision &&
+        !input.forceCard &&
+        !isAnswerRequest(input.question) &&
+        !isTechnicalRequest(input.question) &&
+        input.question.length <= 240);
     const contextMode = decideConversationContext({
       ambient: input.ambient,
       casual,
@@ -1182,6 +1192,9 @@ export class DiscordBot {
               serverEmojis,
               isOwner: input.isOwner,
               ...(useVision ? { imageUrls: input.imageUrls } : {}),
+              ...(useVision && input.uncaptionedImage
+                ? { uncaptionedImage: true }
+                : {}),
               runtimeCapabilities: {
                 nativeVoiceEnabled: this.dependencies.voice.enabled,
                 liveVoiceChatEnabled:
