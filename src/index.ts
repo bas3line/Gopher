@@ -7,6 +7,8 @@ import { startHealthServer } from "./health.ts";
 import { Coordinator } from "./infra/coordinator.ts";
 import { createLogger } from "./logger.ts";
 import { MemoryStore } from "./memory/store.ts";
+import { MemoryExtractor } from "./memory/extractor.ts";
+import { MemoryWorker } from "./memory/worker.ts";
 import { MusicStore } from "./music/store.ts";
 import { CloudflareAuraVoice } from "./voice/cloudflare-aura.ts";
 import { CloudflareWhisper } from "./voice/cloudflare-whisper.ts";
@@ -42,6 +44,14 @@ const summaryAI = new AIClient({
   reasoningEffort: config.text.reasoningEffort,
   temperature: 0.2,
   acceptTruncatedOutput: true,
+  logger,
+});
+const memoryAI = new AIClient({
+  endpoint: config.text.endpoint,
+  apiKey: config.text.apiKey,
+  maxTokens: config.text.memoryMaxTokens,
+  reasoningEffort: config.text.reasoningEffort,
+  temperature: 0.1,
   logger,
 });
 const visionAI = new AIClient({
@@ -92,6 +102,17 @@ const voice = new FallbackVoice({
   fallbackName: "Cloudflare Aura-2 Amalthea",
   logger,
 });
+const memoryWorker = new MemoryWorker({
+  store: memory,
+  extractor: new MemoryExtractor({
+    client: memoryAI,
+    model: config.text.model,
+  }),
+  model: config.text.model,
+  logger,
+  batchSize: config.memory.batchSize,
+  idlePollMs: config.memory.pollMs,
+});
 const bot = new DiscordBot({
   config,
   textAI,
@@ -113,6 +134,10 @@ let shuttingDown = false;
 async function start(): Promise<void> {
   await migrate(pool);
   logger.info("database migrations complete");
+  if (config.memory.workerEnabled) {
+    memoryWorker.start();
+    logger.info("durable memory consolidation worker started");
+  }
   await coordinator.connect();
   logger.info("Redis coordination ready");
   await bot.start(config.discordToken!);
@@ -131,6 +156,7 @@ async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, "shutting down");
   healthServer?.stop(true);
   await bot.stop();
+  await memoryWorker.stop();
   await Promise.allSettled([coordinator.close(), pool.end()]);
 }
 
@@ -144,6 +170,7 @@ try {
   await start();
 } catch (error) {
   logger.fatal({ err: error }, "startup failed");
+  await memoryWorker.stop();
   await Promise.allSettled([coordinator.close(), pool.end()]);
   process.exit(1);
 }

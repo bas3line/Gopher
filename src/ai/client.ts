@@ -29,6 +29,55 @@ export interface CompletionClient {
   complete(messages: ChatMessage[], model: string): Promise<CompletionResult>;
 }
 
+export interface FunctionToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+    strict?: boolean;
+  };
+}
+
+export interface AssistantToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export type AgentChatMessage =
+  | ChatMessage
+  | {
+      role: "assistant";
+      content: string | null;
+      tool_calls: AssistantToolCall[];
+    }
+  | {
+      role: "tool";
+      tool_call_id: string;
+      name: string;
+      content: string;
+    };
+
+export interface AgentTurnResult {
+  content?: string;
+  toolCalls: AssistantToolCall[];
+  assistantMessage: Extract<AgentChatMessage, { role: "assistant" }>;
+  promptTokens?: number;
+  completionTokens?: number;
+}
+
+export interface AgentCompletionClient extends CompletionClient {
+  completeToolTurn(
+    messages: AgentChatMessage[],
+    model: string,
+    tools: FunctionToolDefinition[],
+  ): Promise<AgentTurnResult>;
+}
+
 export type ReasoningEffort =
   "none" | "low" | "medium" | "high" | "max" | "xhigh";
 
@@ -50,6 +99,18 @@ const responseSchema = z.object({
         message: z.object({
           content: z.string().nullable().optional(),
           reasoning_content: z.string().nullable().optional(),
+          tool_calls: z
+            .array(
+              z.object({
+                id: z.string().min(1),
+                type: z.literal("function"),
+                function: z.object({
+                  name: z.string().min(1),
+                  arguments: z.string(),
+                }),
+              }),
+            )
+            .optional(),
         }),
       }),
     )
@@ -72,7 +133,16 @@ export class AIProviderError extends Error {
   }
 }
 
-export class AIClient implements CompletionClient {
+interface ProviderTurn {
+  content: string;
+  reasoningContent: string;
+  toolCalls: AssistantToolCall[];
+  finishReason?: string | null;
+  promptTokens?: number;
+  completionTokens?: number;
+}
+
+export class AIClient implements AgentCompletionClient {
   constructor(
     private readonly options: {
       endpoint: string;
@@ -91,12 +161,85 @@ export class AIClient implements CompletionClient {
     messages: ChatMessage[],
     model: string,
   ): Promise<CompletionResult> {
+    const turn = await this.completeProviderTurn(messages, model);
+    const wasTruncated = turn.finishReason === "length";
+    if (wasTruncated && !this.options.acceptTruncatedOutput) {
+      throw new AIProviderError(
+        "AI provider exhausted its answer budget before completing the response",
+        false,
+      );
+    }
+    if (!turn.content) {
+      throw new AIProviderError(
+        turn.reasoningContent
+          ? "AI provider exhausted its answer budget before producing a final response"
+          : "AI provider returned an empty response",
+        false,
+      );
+    }
+
+    return {
+      content: turn.content,
+      ...(turn.promptTokens !== undefined
+        ? { promptTokens: turn.promptTokens }
+        : {}),
+      ...(turn.completionTokens !== undefined
+        ? { completionTokens: turn.completionTokens }
+        : {}),
+      ...(wasTruncated ? { truncated: true } : {}),
+    };
+  }
+
+  async completeToolTurn(
+    messages: AgentChatMessage[],
+    model: string,
+    tools: FunctionToolDefinition[],
+  ): Promise<AgentTurnResult> {
+    const turn = await this.completeProviderTurn(messages, model, tools);
+    if (turn.finishReason === "length") {
+      throw new AIProviderError(
+        "AI provider exhausted its answer budget during an agent turn",
+        false,
+      );
+    }
+    if (!turn.content && turn.toolCalls.length === 0) {
+      throw new AIProviderError(
+        turn.reasoningContent
+          ? "AI provider exhausted its answer budget before producing an agent action"
+          : "AI provider returned an empty agent turn",
+        false,
+      );
+    }
+
+    const assistantMessage = {
+      role: "assistant" as const,
+      content: turn.content || null,
+      tool_calls: turn.toolCalls,
+    };
+    return {
+      ...(turn.content ? { content: turn.content } : {}),
+      toolCalls: turn.toolCalls,
+      assistantMessage,
+      ...(turn.promptTokens !== undefined
+        ? { promptTokens: turn.promptTokens }
+        : {}),
+      ...(turn.completionTokens !== undefined
+        ? { completionTokens: turn.completionTokens }
+        : {}),
+    };
+  }
+
+  private async completeProviderTurn(
+    messages: AgentChatMessage[],
+    model: string,
+    tools?: FunctionToolDefinition[],
+  ): Promise<ProviderTurn> {
     const maxRetries = this.options.maxRetries ?? 2;
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       try {
-        return await this.request(messages, model);
+        return await this.request(messages, model, tools);
       } catch (error) {
         lastError = error;
         const retryable = error instanceof AIProviderError && error.retryable;
@@ -109,9 +252,10 @@ export class AIClient implements CompletionClient {
   }
 
   private async request(
-    messages: ChatMessage[],
+    messages: AgentChatMessage[],
     model: string,
-  ): Promise<CompletionResult> {
+    tools?: FunctionToolDefinition[],
+  ): Promise<ProviderTurn> {
     let response: Response;
     try {
       response = await fetch(this.options.endpoint, {
@@ -129,6 +273,13 @@ export class AIClient implements CompletionClient {
           stream: false,
           ...(this.options.reasoningEffort
             ? { reasoning_effort: this.options.reasoningEffort }
+            : {}),
+          ...(tools?.length
+            ? {
+                tools,
+                tool_choice: "auto",
+                parallel_tool_calls: true,
+              }
             : {}),
         }),
         signal: AbortSignal.timeout(this.options.timeoutMs ?? 75_000),
@@ -186,33 +337,20 @@ export class AIClient implements CompletionClient {
     }
 
     const message = parsed.data.choices[0]?.message;
-    const wasTruncated = parsed.data.choices[0]?.finish_reason === "length";
-    if (wasTruncated && !this.options.acceptTruncatedOutput) {
-      throw new AIProviderError(
-        "AI provider exhausted its answer budget before completing the response",
-        false,
-      );
-    }
     const content = sanitizeModelOutput(message?.content ?? "");
-    if (!content) {
-      const hadReasoning = Boolean(message?.reasoning_content?.trim());
-      throw new AIProviderError(
-        hadReasoning
-          ? "AI provider exhausted its answer budget before producing a final response"
-          : "AI provider returned an empty response",
-        false,
-      );
-    }
-
     return {
       content,
+      reasoningContent: message?.reasoning_content?.trim() ?? "",
+      toolCalls: message?.tool_calls ?? [],
+      ...(parsed.data.choices[0]?.finish_reason !== undefined
+        ? { finishReason: parsed.data.choices[0]?.finish_reason }
+        : {}),
       ...(parsed.data.usage?.prompt_tokens !== undefined
         ? { promptTokens: parsed.data.usage.prompt_tokens }
         : {}),
       ...(parsed.data.usage?.completion_tokens !== undefined
         ? { completionTokens: parsed.data.usage.completion_tokens }
         : {}),
-      ...(wasTruncated ? { truncated: true } : {}),
     };
   }
 }

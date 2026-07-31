@@ -128,4 +128,156 @@ describe("OpenAI-compatible client", () => {
       expect((error as AIProviderError).retryable).toBeFalse();
     }
   });
+
+  test("preserves parallel tool calls and sends the documented tool controls", async () => {
+    const endpoint = startServer(async (request) => {
+      const body = (await request.json()) as Record<string, unknown>;
+      expect(body.tool_choice).toBe("auto");
+      expect(body.parallel_tool_calls).toBe(true);
+      expect(body.tools).toEqual([
+        {
+          type: "function",
+          function: {
+            name: "memory_search",
+            description: "Search durable memory",
+            parameters: {
+              type: "object",
+              properties: { query: { type: "string" } },
+              required: ["query"],
+              additionalProperties: false,
+            },
+          },
+        },
+      ]);
+      return Response.json({
+        choices: [
+          {
+            finish_reason: "tool_calls",
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_memory",
+                  type: "function",
+                  function: {
+                    name: "memory_search",
+                    arguments: '{"query":"project atlas"}',
+                  },
+                },
+                {
+                  id: "call_web",
+                  type: "function",
+                  function: {
+                    name: "web_search",
+                    arguments: '{"query":"latest project atlas release"}',
+                  },
+                },
+              ],
+            },
+          },
+        ],
+        usage: { prompt_tokens: 20, completion_tokens: 8 },
+      });
+    });
+    const client = new AIClient({
+      endpoint,
+      apiKey: "local-test-key",
+      maxTokens: 2_400,
+      logger: pino({ level: "silent" }),
+      maxRetries: 0,
+    });
+    const result = await client.completeToolTurn(
+      [{ role: "user", content: "what changed since our atlas plan?" }],
+      "fun-model",
+      [
+        {
+          type: "function",
+          function: {
+            name: "memory_search",
+            description: "Search durable memory",
+            parameters: {
+              type: "object",
+              properties: { query: { type: "string" } },
+              required: ["query"],
+              additionalProperties: false,
+            },
+          },
+        },
+      ],
+    );
+
+    expect(result.content).toBeUndefined();
+    expect(result.toolCalls.map((call) => call.function.name)).toEqual([
+      "memory_search",
+      "web_search",
+    ]);
+    expect(result.assistantMessage).toEqual({
+      role: "assistant",
+      content: null,
+      tool_calls: result.toolCalls,
+    });
+    expect(result.promptTokens).toBe(20);
+    expect(result.completionTokens).toBe(8);
+  });
+
+  test("accepts tool outputs on the next agent turn", async () => {
+    const endpoint = startServer(async (request) => {
+      const body = (await request.json()) as {
+        messages: Array<Record<string, unknown>>;
+      };
+      expect(body.messages.at(-1)).toEqual({
+        role: "tool",
+        tool_call_id: "call_memory",
+        name: "memory_search",
+        content: '{"memories":[]}',
+      });
+      return Response.json({
+        choices: [
+          {
+            finish_reason: "stop",
+            message: { content: "nothing durable matched." },
+          },
+        ],
+      });
+    });
+    const client = new AIClient({
+      endpoint,
+      apiKey: "local-test-key",
+      maxTokens: 2_400,
+      logger: pino({ level: "silent" }),
+      maxRetries: 0,
+    });
+    await expect(
+      client.completeToolTurn(
+        [
+          { role: "user", content: "remember anything about atlas?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_memory",
+                type: "function",
+                function: {
+                  name: "memory_search",
+                  arguments: '{"query":"atlas"}',
+                },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            tool_call_id: "call_memory",
+            name: "memory_search",
+            content: '{"memories":[]}',
+          },
+        ],
+        "fun-model",
+        [],
+      ),
+    ).resolves.toMatchObject({
+      content: "nothing durable matched.",
+      toolCalls: [],
+    });
+  });
 });

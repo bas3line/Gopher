@@ -35,6 +35,12 @@ const configSchema = z
       .min(256)
       .max(32_768)
       .default(16_384),
+    MEMORY_MAX_TOKENS: z.coerce
+      .number()
+      .int()
+      .min(512)
+      .max(32_768)
+      .default(8_192),
     TEXT_REASONING_EFFORT: z
       .enum(["none", "low", "medium", "high", "max", "xhigh"])
       .default("none"),
@@ -162,6 +168,51 @@ const configSchema = z
       .max(500)
       .default(40),
     MAX_WEB_RESULTS: z.coerce.number().int().min(1).max(10).default(5),
+    AGENT_ENABLED: z
+      .enum(["true", "false"])
+      .default("true")
+      .transform((value) => value === "true"),
+    DISCORD_AGENT_ACTIONS_ENABLED: z
+      .enum(["true", "false"])
+      .default("true")
+      .transform((value) => value === "true"),
+    AGENT_MAX_ITERATIONS: z.coerce
+      .number()
+      .int()
+      .min(2)
+      .max(16)
+      .default(8),
+    AGENT_MAX_TOOL_CALLS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(64)
+      .default(24),
+    AGENT_MAX_PARALLEL_TOOL_CALLS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(12)
+      .default(6),
+    AGENT_RUN_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(10_000)
+      .max(300_000)
+      .default(120_000),
+    AGENT_TOOL_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(120_000)
+      .default(30_000),
+    MEMORY_WORKER_ENABLED: z
+      .enum(["true", "false"])
+      .default("true")
+      .transform((value) => value === "true"),
+    MEMORY_BATCH_SIZE: z.coerce.number().int().min(4).max(100).default(32),
+    MEMORY_POLL_MS: z.coerce.number().int().min(100).max(10_000).default(750),
+    MEMORY_RECALL_COUNT: z.coerce.number().int().min(4).max(30).default(12),
     LOG_LEVEL: z
       .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
       .default("info"),
@@ -207,6 +258,7 @@ export interface AppConfig {
     model: string;
     maxTokens: number;
     summaryMaxTokens: number;
+    memoryMaxTokens: number;
     reasoningEffort: "none" | "low" | "medium" | "high" | "max" | "xhigh";
   };
   cloudflare: {
@@ -259,6 +311,21 @@ export interface AppConfig {
   ragResultCount: number;
   summaryEveryMessages: number;
   maxWebResults: number;
+  agent: {
+    enabled: boolean;
+    discordActionsEnabled: boolean;
+    maxIterations: number;
+    maxToolCalls: number;
+    maxParallelToolCalls: number;
+    runTimeoutMs: number;
+    toolTimeoutMs: number;
+  };
+  memory: {
+    workerEnabled: boolean;
+    batchSize: number;
+    pollMs: number;
+    recallCount: number;
+  };
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
   healthPort: number;
 }
@@ -283,6 +350,7 @@ export function loadConfig(
       model: value.TEXT_MODEL,
       maxTokens: value.TEXT_MAX_TOKENS,
       summaryMaxTokens: value.SUMMARY_MAX_TOKENS,
+      memoryMaxTokens: value.MEMORY_MAX_TOKENS,
       reasoningEffort: value.TEXT_REASONING_EFFORT,
     },
     cloudflare: {
@@ -339,6 +407,21 @@ export function loadConfig(
     ragResultCount: value.RAG_RESULT_COUNT,
     summaryEveryMessages: value.SUMMARY_EVERY_MESSAGES,
     maxWebResults: value.MAX_WEB_RESULTS,
+    agent: {
+      enabled: value.AGENT_ENABLED,
+      discordActionsEnabled: value.DISCORD_AGENT_ACTIONS_ENABLED,
+      maxIterations: value.AGENT_MAX_ITERATIONS,
+      maxToolCalls: value.AGENT_MAX_TOOL_CALLS,
+      maxParallelToolCalls: value.AGENT_MAX_PARALLEL_TOOL_CALLS,
+      runTimeoutMs: value.AGENT_RUN_TIMEOUT_MS,
+      toolTimeoutMs: value.AGENT_TOOL_TIMEOUT_MS,
+    },
+    memory: {
+      workerEnabled: value.MEMORY_WORKER_ENABLED,
+      batchSize: value.MEMORY_BATCH_SIZE,
+      pollMs: value.MEMORY_POLL_MS,
+      recallCount: value.MEMORY_RECALL_COUNT,
+    },
     logLevel: value.LOG_LEVEL,
     healthPort: value.HEALTH_PORT,
   };

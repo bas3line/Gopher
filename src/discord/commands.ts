@@ -65,7 +65,86 @@ export const commandData = [
     ),
   new SlashCommandBuilder()
     .setName("memory")
-    .setDescription("Show the current channel's rolling long-term memory"),
+    .setDescription("Inspect and control Gopher's revisioned long-term memory")
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("status")
+        .setDescription("Show memory layers and pending consolidation"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("search")
+        .setDescription("Search memories visible in this context")
+        .addStringOption((option) =>
+          option
+            .setName("query")
+            .setDescription("What to recall")
+            .setRequired(true)
+            .setMinLength(2)
+            .setMaxLength(500),
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("remember")
+        .setDescription("Explicitly save a durable memory with evidence")
+        .addStringOption((option) =>
+          option
+            .setName("key")
+            .setDescription("Stable dotted key, like preference.editor")
+            .setRequired(true)
+            .setMinLength(2)
+            .setMaxLength(120),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("content")
+            .setDescription("The concise fact to remember")
+            .setRequired(true)
+            .setMinLength(3)
+            .setMaxLength(1_000),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("kind")
+            .setDescription("What kind of memory this is")
+            .setRequired(true)
+            .addChoices(
+              { name: "Profile", value: "profile" },
+              { name: "Preference", value: "preference" },
+              { name: "Fact", value: "fact" },
+              { name: "Decision", value: "decision" },
+              { name: "Project", value: "project" },
+              { name: "Relationship", value: "relationship" },
+              { name: "Commitment", value: "commitment" },
+              { name: "Event", value: "event" },
+              { name: "Skill", value: "skill" },
+              { name: "Correction", value: "correction" },
+            ),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("scope")
+            .setDescription("User is always allowed; channel/server need admin")
+            .addChoices(
+              { name: "My user memory", value: "user" },
+              { name: "This channel", value: "channel" },
+              { name: "This server", value: "guild" },
+            ),
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("forget")
+        .setDescription("Forget a memory by the ID shown in search")
+        .addIntegerOption((option) =>
+          option
+            .setName("memory_id")
+            .setDescription("Memory ID")
+            .setRequired(true)
+            .setMinValue(1),
+        ),
+    ),
   new SlashCommandBuilder()
     .setName("about")
     .setDescription("Explain what this bot is and what it can do"),

@@ -33,14 +33,21 @@ export class WebResearch {
     return Boolean(this.client);
   }
 
-  async search(query: string): Promise<WebSource[]> {
+  async search(
+    query: string,
+    options: { limit?: number } = {},
+  ): Promise<WebSource[]> {
     if (!this.client) {
       throw new WebResearchError("Firecrawl web search is not configured");
     }
 
     try {
+      const limit = Math.max(
+        1,
+        Math.min(options.limit ?? this.maxResults, this.maxResults),
+      );
       const result = await this.client.search(query, {
-        limit: this.maxResults,
+        limit,
         sources: ["web", "news"],
         scrapeOptions: {
           formats: ["markdown"],
@@ -57,7 +64,7 @@ export class WebResearch {
         if (!normalized || seen.has(normalized.url)) continue;
         seen.add(normalized.url);
         sources.push(normalized);
-        if (sources.length >= this.maxResults) break;
+        if (sources.length >= limit) break;
       }
       if (sources.length === 0) {
         throw new WebResearchError("Firecrawl returned no usable web results");

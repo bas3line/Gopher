@@ -13,6 +13,10 @@ const migrations = [
     version: "003_voice_chat",
     path: new URL("./migrations/003_voice_chat.sql", import.meta.url),
   },
+  {
+    version: "004_agent_memory",
+    path: new URL("./migrations/004_agent_memory.sql", import.meta.url),
+  },
 ] as const;
 
 export async function migrate(pool: DatabasePool): Promise<void> {

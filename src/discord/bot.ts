@@ -6,13 +6,31 @@ import {
   GatewayIntentBits,
   MessageFlags,
   Partials,
+  PermissionFlagsBits,
   type ChatInputCommandInteraction,
   type Guild,
   type Interaction,
   type Message,
+  type MessageReaction,
+  type PartialMessage,
+  type PartialMessageReaction,
+  type PartialUser,
+  type ThreadChannel,
+  type User,
 } from "discord.js";
+import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.ts";
-import { AIProviderError, type CompletionClient } from "../ai/client.ts";
+import {
+  AIProviderError,
+  type AgentCompletionClient,
+  type CompletionClient,
+} from "../ai/client.ts";
+import { AgentLoop, AgentLoopError } from "../agent/loop.ts";
+import type {
+  AgentRequestContext,
+  DiscordAgentAdapter,
+} from "../agent/context.ts";
+import { createAgentTools } from "../agent/tools.ts";
 import {
   buildAmbientMessages,
   buildAnswerMessages,
@@ -66,6 +84,12 @@ import type {
 } from "../voice/fish-audio.ts";
 import { VoiceChatService } from "../voice/chat.ts";
 import { CloudflareWhisper } from "../voice/cloudflare-whisper.ts";
+import { DiscordJsAgentAdapter } from "./agent-adapter.ts";
+import { containsSecret } from "../memory/extractor.ts";
+import {
+  memoryKindSchema,
+  memoryScopeSchema,
+} from "../memory/types.ts";
 
 interface AnswerInput {
   discordMessageId: string;
@@ -81,6 +105,8 @@ interface AnswerInput {
   ambient: boolean;
   forceRecentContext: boolean;
   isOwner: boolean;
+  isAdministrator: boolean;
+  discordAdapter: DiscordAgentAdapter;
 }
 
 interface AnswerOutput {
@@ -101,7 +127,7 @@ export class DiscordBot {
   constructor(
     private readonly dependencies: {
       config: AppConfig;
-      textAI: CompletionClient;
+      textAI: AgentCompletionClient;
       summaryAI: CompletionClient;
       visionAI: CompletionClient;
       memory: MemoryStore;
@@ -124,11 +150,18 @@ export class DiscordBot {
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.GuildMessageReactions,
         GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.DirectMessageReactions,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildVoiceStates,
       ],
-      partials: [Partials.Channel],
+      partials: [
+        Partials.Channel,
+        Partials.Message,
+        Partials.Reaction,
+        Partials.User,
+      ],
       allowedMentions: { parse: [], repliedUser: false },
       presence: {
         status: "online",
@@ -220,6 +253,57 @@ export class DiscordBot {
     this.client.on(Events.MessageCreate, (message) => {
       void this.handleMessage(message);
     });
+    this.client.on(Events.MessageUpdate, (_previous, updated) => {
+      void (async () => {
+        const message = updated.partial ? await updated.fetch() : updated;
+        await this.handleMessageUpdate(message);
+      })().catch((error) => {
+        this.dependencies.logger.warn(
+          { err: error, messageId: updated.id },
+          "failed to record Discord message edit",
+        );
+      });
+    });
+    this.client.on(Events.MessageDelete, (message) => {
+      void this.handleMessageDelete(message).catch((error) => {
+        this.dependencies.logger.warn(
+          { err: error, messageId: message.id },
+          "failed to record Discord message deletion",
+        );
+      });
+    });
+    this.client.on(Events.MessageReactionAdd, (reaction, user) => {
+      void this.handleReactionEvent("add", reaction, user).catch((error) => {
+        this.dependencies.logger.debug(
+          { err: error, messageId: reaction.message.id },
+          "failed to record Discord reaction addition",
+        );
+      });
+    });
+    this.client.on(Events.MessageReactionRemove, (reaction, user) => {
+      void this.handleReactionEvent("remove", reaction, user).catch((error) => {
+        this.dependencies.logger.debug(
+          { err: error, messageId: reaction.message.id },
+          "failed to record Discord reaction removal",
+        );
+      });
+    });
+    this.client.on(Events.ThreadCreate, (thread) => {
+      void this.handleThreadEvent("create", thread).catch((error) => {
+        this.dependencies.logger.debug(
+          { err: error, threadId: thread.id },
+          "failed to record Discord thread creation",
+        );
+      });
+    });
+    this.client.on(Events.ThreadUpdate, (_previous, updated) => {
+      void this.handleThreadEvent("update", updated).catch((error) => {
+        this.dependencies.logger.debug(
+          { err: error, threadId: updated.id },
+          "failed to record Discord thread update",
+        );
+      });
+    });
     this.client.on(Events.InteractionCreate, (interaction) => {
       void this.handleInteraction(interaction).catch((error) => {
         this.dependencies.logger.error(
@@ -309,6 +393,101 @@ export class DiscordBot {
     );
   }
 
+  private async handleMessageUpdate(message: Message): Promise<void> {
+    if (message.webhookId || !message.author) return;
+    const guildId = message.guildId ?? `dm:${message.author.id}`;
+    const content =
+      this.client.user
+        ? stripBotMention(message.content, this.client.user.id)
+        : message.content.trim();
+    await this.dependencies.memory.recordMessageEdit({
+      discordMessageId: message.id,
+      guildId,
+      channelId: message.channelId,
+      actorUserId: message.author.id,
+      replacementContent: content || "[non-text message]",
+      editedAt: message.editedAt ?? new Date(),
+    });
+  }
+
+  private async handleMessageDelete(
+    message: Message | PartialMessage,
+  ): Promise<void> {
+    const authorId = message.author?.id;
+    const guildId =
+      message.guildId ?? `dm:${authorId ?? `channel:${message.channelId}`}`;
+    const deletedAt = new Date();
+    const recorded = await this.dependencies.memory.recordMessageDeletion({
+      discordMessageId: message.id,
+      guildId,
+      channelId: message.channelId,
+      ...(authorId ? { actorUserId: authorId } : {}),
+      deletedAt,
+    });
+    if (!recorded) {
+      await this.dependencies.memory.recordDiscordEvent({
+        eventKey: `message:delete:${message.id}`,
+        guildId,
+        channelId: message.channelId,
+        ...(authorId ? { actorUserId: authorId } : {}),
+        eventType: "message_delete",
+        payload: { discordMessageId: message.id, messageWasNotInMemory: true },
+        occurredAt: deletedAt,
+      });
+    }
+  }
+
+  private async handleReactionEvent(
+    action: "add" | "remove",
+    reaction: MessageReaction | PartialMessageReaction,
+    user: User | PartialUser,
+  ): Promise<void> {
+    const hydratedReaction = reaction.partial
+      ? await reaction.fetch()
+      : reaction;
+    const hydratedUser = user.partial ? await user.fetch() : user;
+    const message = hydratedReaction.message;
+    const guildId =
+      message.guildId ?? `dm:${hydratedUser.id}`;
+    const emoji =
+      hydratedReaction.emoji.id && hydratedReaction.emoji.name
+        ? `<${hydratedReaction.emoji.animated ? "a" : ""}:${hydratedReaction.emoji.name}:${hydratedReaction.emoji.id}>`
+        : (hydratedReaction.emoji.name ?? "unknown");
+    await this.dependencies.memory.recordDiscordEvent({
+      eventKey: `reaction:${action}:${message.id}:${hydratedReaction.emoji.identifier}:${hydratedUser.id}`,
+      guildId,
+      channelId: message.channelId,
+      actorUserId: hydratedUser.id,
+      eventType: action === "add" ? "reaction_add" : "reaction_remove",
+      payload: { discordMessageId: message.id, emoji },
+      occurredAt: new Date(),
+    });
+  }
+
+  private async handleThreadEvent(
+    action: "create" | "update",
+    thread: ThreadChannel,
+  ): Promise<void> {
+    await this.dependencies.memory.recordDiscordEvent({
+      eventKey:
+        action === "create"
+          ? `thread:create:${thread.id}`
+          : `thread:update:${thread.id}:${thread.archived ? "archived" : "active"}:${thread.locked ? "locked" : "unlocked"}:${thread.name}`,
+      guildId: thread.guildId,
+      channelId: thread.id,
+      eventType: action === "create" ? "thread_create" : "thread_update",
+      payload: {
+        threadId: thread.id,
+        parentId: thread.parentId,
+        name: thread.name,
+        archived: thread.archived,
+        locked: thread.locked,
+      },
+      occurredAt:
+        action === "create" ? (thread.createdAt ?? new Date()) : new Date(),
+    });
+  }
+
   private async handleMessage(message: Message): Promise<void> {
     if (message.author.bot || message.webhookId || !this.client.user) return;
 
@@ -350,6 +529,10 @@ export class DiscordBot {
         role: "user",
         content: cleanContent,
         attachments,
+        ...(message.reference?.messageId
+          ? { replyToDiscordMessageId: message.reference.messageId }
+          : {}),
+        createdAt: message.createdAt,
       });
 
       if (message.guildId && shouldReactWithTuff(cleanContent)) {
@@ -443,6 +626,17 @@ export class DiscordBot {
             ambient,
             forceRecentContext: isReplyToBot || !message.guildId,
             isOwner,
+            isAdministrator:
+              message.member?.permissions.has(
+                PermissionFlagsBits.Administrator,
+              ) ?? false,
+            discordAdapter: new DiscordJsAgentAdapter({
+              client: this.client,
+              ...(message.guildId ? { guildId: message.guildId } : {}),
+              channelId: message.channelId,
+              requesterUserId: message.author.id,
+              triggerMessageId: message.id,
+            }),
           });
           if (!answer) return false;
           const sent = await this.sendMessageAnswer(message, answer);
@@ -454,6 +648,8 @@ export class DiscordBot {
             username: this.client.user?.username ?? "Gopher",
             role: "assistant",
             content: answer.rawAnswer,
+            replyToDiscordMessageId: message.id,
+            createdAt: sent.createdAt,
           });
           await this.maybeSummarize(guildId, message.channelId);
           return true;
@@ -519,17 +715,7 @@ export class DiscordBot {
 
     const guildId = interaction.guildId ?? `dm:${interaction.user.id}`;
     if (interaction.commandName === "memory") {
-      const summary = await this.dependencies.memory.summary(
-        guildId,
-        interaction.channelId,
-      );
-      await interaction.reply({
-        content: summary
-          ? `**Current rolling memory**\n${summary.summary.slice(0, 1_800)}`
-          : "No rolling summary yet. I still retain recent messages and searchable history.",
-        flags: MessageFlags.Ephemeral,
-        allowedMentions: { parse: [] },
-      });
+      await this.handleMemoryInteraction(interaction, guildId);
       return;
     }
 
@@ -561,6 +747,7 @@ export class DiscordBot {
         username,
         role: "user",
         content: question,
+        createdAt: interaction.createdAt,
       });
 
       const result = await this.dependencies.coordinator.withChannelLock(
@@ -586,6 +773,18 @@ export class DiscordBot {
             isOwner: this.dependencies.config.ownerUserIds.includes(
               interaction.user.id,
             ),
+            isAdministrator:
+              interaction.memberPermissions?.has(
+                PermissionFlagsBits.Administrator,
+              ) ?? false,
+            discordAdapter: new DiscordJsAgentAdapter({
+              client: this.client,
+              ...(interaction.guildId
+                ? { guildId: interaction.guildId }
+                : {}),
+              channelId: interaction.channelId,
+              requesterUserId: interaction.user.id,
+            }),
           });
           if (!answer)
             throw new Error(
@@ -600,6 +799,7 @@ export class DiscordBot {
             username: this.client.user?.username ?? "Gopher",
             role: "assistant",
             content: answer.rawAnswer,
+            createdAt: new Date(),
           });
           await this.maybeSummarize(guildId, interaction.channelId);
           return true;
@@ -621,6 +821,158 @@ export class DiscordBot {
       );
       await interaction.editReply(this.userFacingError(error));
     }
+  }
+
+  private async handleMemoryInteraction(
+    interaction: ChatInputCommandInteraction,
+    guildId: string,
+  ): Promise<void> {
+    const subcommand = interaction.options.getSubcommand();
+    const isOwner = this.dependencies.config.ownerUserIds.includes(
+      interaction.user.id,
+    );
+    const isAdministrator =
+      interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ??
+      false;
+
+    if (subcommand === "status") {
+      const [summary, overview] = await Promise.all([
+        this.dependencies.memory.summary(guildId, interaction.channelId),
+        this.dependencies.memory.memoryOverview({
+          guildId,
+          channelId: interaction.channelId,
+          userId: interaction.user.id,
+        }),
+      ]);
+      await interaction.reply({
+        content:
+          `**memory status**\n` +
+          `typed memories: ${overview.total} (${overview.user} yours, ${overview.channel} channel, ${overview.guild} server)\n` +
+          `pending consolidation jobs: ${overview.pendingIngestion}\n` +
+          `rolling channel summary: ${summary ? `updated ${summary.updatedAt.toISOString()}` : "not built yet"}\n\n` +
+          (summary
+            ? summary.summary.slice(0, 1_350)
+            : "Raw message history is still retained and searchable while consolidation catches up."),
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
+
+    if (subcommand === "search") {
+      const query = interaction.options.getString("query", true);
+      const memories = await this.dependencies.memory.recall({
+        guildId,
+        channelId: interaction.channelId,
+        userId: interaction.user.id,
+        query,
+        limit: 10,
+      });
+      const content =
+        memories.length === 0
+          ? "no durable memory matched that query."
+          : memories
+              .map(
+                (memory) =>
+                  `**#${memory.id} · ${memory.kind} · ${memory.scope} · ${(memory.confidence * 100).toFixed(0)}%**\n${memory.content.slice(0, 500)}`,
+              )
+              .join("\n\n")
+              .slice(0, 1_950);
+      await interaction.reply({
+        content,
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
+
+    if (subcommand === "remember") {
+      const scope = memoryScopeSchema.parse(
+        interaction.options.getString("scope") ?? "user",
+      );
+      if (
+        scope !== "user" &&
+        !isOwner &&
+        !isAdministrator
+      ) {
+        await interaction.reply({
+          content:
+            "channel/server memory writes need a bot owner or server administrator.",
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        });
+        return;
+      }
+      const content = interaction.options.getString("content", true);
+      if (containsSecret(content)) {
+        await interaction.reply({
+          content:
+            "i won't put credentials or authentication material into durable memory.",
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        });
+        return;
+      }
+      const evidenceMessageId = `interaction:${interaction.id}`;
+      await this.dependencies.memory.recordMessage({
+        discordMessageId: evidenceMessageId,
+        guildId,
+        channelId: interaction.channelId,
+        userId: interaction.user.id,
+        username:
+          interaction.user.globalName ?? interaction.user.username,
+        role: "user",
+        content: `[explicit memory request] ${content}`,
+        createdAt: interaction.createdAt,
+      });
+      const saved = await this.dependencies.memory.upsertMemories({
+        guildId,
+        channelId: interaction.channelId,
+        source: "explicit",
+        candidates: [
+          {
+            scope,
+            ...(scope === "user"
+              ? { subjectUserId: interaction.user.id }
+              : {}),
+            kind: memoryKindSchema.parse(
+              interaction.options.getString("kind", true),
+            ),
+            key: interaction.options.getString("key", true),
+            content,
+            importance: 8,
+            confidence: 1,
+            evidenceMessageIds: [evidenceMessageId],
+            reason: "Saved through the explicit /memory remember command.",
+          },
+        ],
+      });
+      const memory = saved[0];
+      await interaction.reply({
+        content: memory
+          ? `remembered as **#${memory.id} · ${memory.key}** (revision ${memory.version}).`
+          : "nothing was saved.",
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
+
+    const memoryId = interaction.options.getInteger("memory_id", true);
+    const forgotten = await this.dependencies.memory.forgetMemory({
+      id: memoryId,
+      guildId,
+      requesterUserId: interaction.user.id,
+      allowGuildScope: isOwner || isAdministrator,
+      reason: `Forgotten through /memory by Discord user ${interaction.user.id}`,
+    });
+    await interaction.reply({
+      content: forgotten
+        ? `forgot memory **#${memoryId}**. its revision audit remains, but it will not be recalled.`
+        : "that memory does not exist or you cannot forget it.",
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
   }
 
   private async handleTextMusicCommand(
@@ -654,6 +1006,8 @@ export class DiscordBot {
       username: this.client.user?.username ?? "Gopher",
       role: "assistant",
       content,
+      replyToDiscordMessageId: message.id,
+      createdAt: sent.createdAt,
     });
     await this.maybeSummarize(guildId, message.channelId);
   }
@@ -704,11 +1058,14 @@ export class DiscordBot {
       );
     }
 
+    const useAgent = config.agent.enabled && !input.ambient && !useVision;
     const shouldSearch =
+      !useAgent &&
       !input.ambient &&
       (input.forceWebSearch || needsWebSearch(input.question));
     const casual =
       !shouldSearch &&
+      !input.forceWebSearch &&
       !useVision &&
       !input.forceCard &&
       !isAnswerRequest(input.question) &&
@@ -749,21 +1106,29 @@ export class DiscordBot {
         .filter((message) => message.role === "user")
         .map((message) => message.content),
     );
-    const [summary, relevant] =
-      contextMode === "full"
-        ? await Promise.all([
-            memory.summary(input.guildId, input.channelId),
-            memory.relevant(
-              input.guildId,
-              input.channelId,
-              retrievalQuery,
-              config.ragResultCount,
-            ),
-          ])
-        : [undefined, []];
+    const loadLongTermContext =
+      contextMode === "full" || (useAgent && !casual);
+    const [summary, relevant, memoryPack] = loadLongTermContext
+      ? await Promise.all([
+          memory.summary(input.guildId, input.channelId),
+          memory.relevant(
+            input.guildId,
+            input.channelId,
+            retrievalQuery,
+            config.ragResultCount,
+          ),
+          memory.contextPack({
+            guildId: input.guildId,
+            channelId: input.channelId,
+            userId: input.userId,
+            query: retrievalQuery,
+            limit: config.memory.recallCount,
+          }),
+        ])
+      : [undefined, [], undefined];
     const model = useVision ? config.openAI.visionModel : config.text.model;
     const completionClient = useVision ? visionAI : textAI;
-    const kind = useVision ? "vision" : "chat";
+    const kind = useVision ? "vision" : useAgent ? "agent" : "chat";
     const startedAt = performance.now();
 
     try {
@@ -782,6 +1147,12 @@ export class DiscordBot {
               recent: recentWithoutCurrent,
               relevant,
               webSources: sources,
+              ...(memoryPack?.durable.length
+                ? { durableMemories: memoryPack.durable }
+                : {}),
+              ...(memoryPack?.commitments.length
+                ? { pendingCommitments: memoryPack.commitments }
+                : {}),
               serverEmojis,
               isOwner: input.isOwner,
               ...(useVision ? { imageUrls: input.imageUrls } : {}),
@@ -796,10 +1167,140 @@ export class DiscordBot {
                   this.voiceChat.hasActiveSession(input.guildId),
                 musicEnabled: this.music?.enabled ?? false,
               },
+              ...(useAgent
+                ? {
+                    agentRuntime: {
+                      enabled: true,
+                      currentDate: new Date().toISOString().slice(0, 10),
+                      webEnabled: web.enabled,
+                      discordActionsEnabled:
+                        config.agent.discordActionsEnabled,
+                      forceWebSearch: input.forceWebSearch,
+                    },
+                  }
+                : {}),
             });
-      const completion = await this.semaphore.use(() =>
-        completionClient.complete(promptMessages, model),
-      );
+      let completion;
+      if (useAgent) {
+        const runId = randomUUID();
+        let observedIterations = 0;
+        let observedToolCalls = 0;
+        let observedPromptTokens = 0;
+        let observedCompletionTokens = 0;
+        await memory.startAgentRun({
+          id: runId,
+          guildId: input.guildId,
+          channelId: input.channelId,
+          userId: input.userId,
+          discordMessageId: input.discordMessageId,
+          model,
+        });
+        const agentContext: AgentRequestContext = {
+          guildId: input.guildId,
+          channelId: input.channelId,
+          userId: input.userId,
+          username: input.username,
+          requestText: input.question,
+          discordMessageId: input.discordMessageId,
+          isOwner: input.isOwner,
+          isAdministrator: input.isAdministrator,
+          isDirectMessage: input.guildId.startsWith("dm:"),
+          discordActionsEnabled: config.agent.discordActionsEnabled,
+          memory,
+          web,
+          discord: input.discordAdapter,
+          collectedWebSources: sources,
+        };
+        const agent = new AgentLoop({
+          client: {
+            complete: async (messages, selectedModel) =>
+              await this.semaphore.use(() =>
+                textAI.complete(messages, selectedModel),
+              ),
+            completeToolTurn: async (messages, selectedModel, tools) =>
+              await this.semaphore.use(() =>
+                textAI.completeToolTurn(messages, selectedModel, tools),
+              ),
+          },
+          model,
+          tools: createAgentTools({
+            webEnabled: web.enabled,
+            discordAvailable: true,
+            discordWritesEnabled: config.agent.discordActionsEnabled,
+          }),
+          logger: this.dependencies.logger,
+          options: {
+            maxIterations: config.agent.maxIterations,
+            maxToolCalls: config.agent.maxToolCalls,
+            maxParallelToolCalls: config.agent.maxParallelToolCalls,
+            runTimeoutMs: config.agent.runTimeoutMs,
+            toolTimeoutMs: config.agent.toolTimeoutMs,
+          },
+          observer: {
+            modelTurn: async (event) => {
+              observedIterations = Math.max(
+                observedIterations,
+                event.iteration,
+              );
+              observedToolCalls += event.toolCallCount;
+              observedPromptTokens += event.promptTokens ?? 0;
+              observedCompletionTokens += event.completionTokens ?? 0;
+            },
+            toolExecution: async (execution) => {
+              await memory
+                .recordAgentToolExecution(runId, execution)
+                .catch((error) => {
+                  this.dependencies.logger.warn(
+                    { err: error, runId, callId: execution.callId },
+                    "could not record agent tool telemetry",
+                  );
+                });
+            },
+          },
+        });
+        try {
+          const result = await agent.run({
+            runId,
+            messages: promptMessages,
+            context: agentContext,
+          });
+          completion = {
+            content: result.content,
+            promptTokens: result.usage.promptTokens,
+            completionTokens: result.usage.completionTokens,
+          };
+          await memory.finishAgentRun({
+            id: runId,
+            status: "completed",
+            iterations: result.iterations,
+            toolCalls: result.toolCalls,
+            promptTokens: result.usage.promptTokens,
+            completionTokens: result.usage.completionTokens,
+          });
+        } catch (error) {
+          await memory
+            .finishAgentRun({
+              id: runId,
+              status: "failed",
+              iterations: observedIterations,
+              toolCalls: observedToolCalls,
+              promptTokens: observedPromptTokens,
+              completionTokens: observedCompletionTokens,
+              errorCode:
+                error instanceof AgentLoopError
+                  ? error.code
+                  : error instanceof AIProviderError
+                    ? "provider_error"
+                    : "agent_error",
+            })
+            .catch(() => undefined);
+          throw error;
+        }
+      } else {
+        completion = await this.semaphore.use(() =>
+          completionClient.complete(promptMessages, model),
+        );
+      }
       await memory.recordAIEvent({
         guildId: input.guildId,
         channelId: input.channelId,
@@ -1281,6 +1782,11 @@ export class DiscordBot {
     }
     if (error instanceof WebResearchError) {
       return "web search died, not gonna fake it";
+    }
+    if (error instanceof AgentLoopError) {
+      return error.code === "tool_budget" || error.code === "iteration_limit"
+        ? "agent loop hit its safety limit before finishing. narrow the request and try again."
+        : "agent run timed out, try again";
     }
     if (error instanceof Error && error.message.startsWith("Vision limit")) {
       return error.message;
