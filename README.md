@@ -57,8 +57,9 @@ Never commit `.env`.
 For semantic memory, configure `EMBEDDING_API_URL`, `EMBEDDING_API_KEY`, and `EMBEDDING_MODEL`
 together. OpenAI's `text-embedding-3-large` with `EMBEDDING_DIMENSIONS=1024` is the reference
 configuration. Without it, all raw/typed memory still works and recall falls back to PostgreSQL
-full-text plus trigram ranking. The Compose database already includes pgvector; an external
-PostgreSQL service must provide the `vector` and `pg_trgm` extensions.
+full-text plus trigram ranking. The Compose database builds pgvector on the same PostgreSQL 17
+Alpine base used by existing installations, preserving bind-volume ownership and libc compatibility;
+an external PostgreSQL service must provide the `vector` and `pg_trgm` extensions.
 
 For live voice chat, Cloudflare credentials are required. Set `VOICE_CHAT_ENABLED=true`; then a server
 administrator can join a VC and run `/voicechat join`. The bot uses Cloudflare Whisper Large v3 Turbo

@@ -111,7 +111,8 @@ Semantic recall is optional at runtime. Configure `EMBEDDING_API_URL`, `EMBEDDIN
 `EMBEDDING_MODEL` together to enable it. Existing and revised memories are embedded asynchronously
 in batches; changing the configured model makes completed jobs eligible for refresh. If the
 embedding provider fails, recall falls back to lexical retrieval instead of making the bot amnesic.
-The supplied Compose stack uses pgvector 0.8.5 on PostgreSQL 17.
+The supplied Compose stack builds pgvector 0.8.5 on PostgreSQL 17 Alpine. Retaining the existing
+database base image preserves bind-volume ownership and libc compatibility during upgrades.
 
 ## Consolidation lifecycle
 

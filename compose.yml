@@ -2,7 +2,13 @@ name: go-senior-discord-bot
 
 services:
   postgres:
-    image: pgvector/pgvector:0.8.5-pg17
+    build:
+      context: .
+      dockerfile: postgres.Dockerfile
+      args:
+        PGVECTOR_VERSION: "0.8.5"
+        PGVECTOR_SHA256: 6f88a5cbdde31666f4b6c1a6b75c51dcbeffe58f9a7d2b26e502d5a6e5e14d44
+    image: go-senior-discord-bot-postgres:17-vector-0.8.5
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-go_senior_bot}
