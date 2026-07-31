@@ -132,6 +132,8 @@ export class AIProviderError extends Error {
   constructor(
     message: string,
     public readonly retryable: boolean,
+    public readonly status?: number,
+    public readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "AIProviderError";
@@ -159,6 +161,8 @@ export class AIClient implements AgentCompletionClient {
       acceptTruncatedOutput?: boolean;
       timeoutMs?: number;
       maxRetries?: number;
+      retryBaseDelayMs?: number;
+      maxRetryDelayMs?: number;
     },
   ) {}
 
@@ -265,7 +269,14 @@ export class AIClient implements AgentCompletionClient {
         lastError = error;
         const retryable = error instanceof AIProviderError && error.retryable;
         if (!retryable || attempt === maxRetries) throw error;
-        await Bun.sleep(350 * 2 ** attempt + Math.floor(Math.random() * 150));
+        const fallbackDelay =
+          (this.options.retryBaseDelayMs ?? 750) * 2 ** attempt +
+          Math.floor(Math.random() * 200);
+        const delay = Math.min(
+          this.options.maxRetryDelayMs ?? 15_000,
+          Math.max(100, error.retryAfterMs ?? fallbackDelay),
+        );
+        await abortableSleep(delay, signal);
       }
     }
 
@@ -344,14 +355,19 @@ export class AIClient implements AgentCompletionClient {
         response.status === 408 ||
         response.status === 429 ||
         response.status >= 500;
+      const retryAfterMs = retryAfterMilliseconds(
+        response.headers.get("retry-after"),
+      );
       this.options.logger.warn(
-        { status: response.status, requestId, retryable },
+        { status: response.status, requestId, retryable, retryAfterMs },
         "AI provider returned an error",
       );
       await response.body?.cancel();
       throw new AIProviderError(
         `AI provider returned HTTP ${response.status}${requestId ? ` (request ${requestId})` : ""}`,
         retryable,
+        response.status,
+        retryAfterMs,
       );
     }
 
@@ -391,4 +407,35 @@ export class AIClient implements AgentCompletionClient {
         : {}),
     };
   }
+}
+
+export function retryAfterMilliseconds(
+  value: string | null,
+  now = Date.now(),
+): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.round(seconds * 1_000);
+  }
+  const resetAt = Date.parse(value);
+  if (!Number.isFinite(resetAt)) return undefined;
+  return Math.max(0, resetAt - now);
+}
+
+function abortableSleep(
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!signal) return Bun.sleep(milliseconds);
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timeout = setTimeout(done, milliseconds);
+    signal.addEventListener("abort", done, { once: true });
+    function done() {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+  });
 }

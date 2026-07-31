@@ -4,6 +4,7 @@ import type {
   CompletionClient,
   CompletionResult,
 } from "../ai/client.ts";
+import { AIProviderError } from "../ai/client.ts";
 import { normalizeMemoryKey } from "./store.ts";
 import {
   memoryKindSchema,
@@ -19,7 +20,7 @@ import type { StoredMessage } from "../types.ts";
 const candidateSchema = z
   .object({
     scope: memoryScopeSchema,
-    subjectUserId: z.string().min(1).max(40).optional(),
+    subjectUserId: z.string().min(1).max(40).nullish(),
     kind: memoryKindSchema,
     key: z.string().min(2).max(120),
     content: z.string().trim().min(3).max(4_000),
@@ -29,16 +30,16 @@ const candidateSchema = z
     evidenceMessageIds: z.array(z.string().min(1).max(100)).max(8),
     reason: z.string().trim().min(3).max(500),
   })
-  .strict();
+  .strip();
 
 const identitySchema = z
   .object({
     scope: memoryScopeSchema,
-    subjectUserId: z.string().min(1).max(40).optional(),
+    subjectUserId: z.string().min(1).max(40).nullish(),
     kind: memoryKindSchema,
     key: z.string().min(2).max(120),
   })
-  .strict();
+  .strip();
 
 const relationSchema = z
   .object({
@@ -48,14 +49,14 @@ const relationSchema = z
     confidence: z.number().min(0.6).max(1),
     evidenceMessageIds: z.array(z.string().min(1).max(100)).min(1).max(8),
   })
-  .strict();
+  .strip();
 
 const extractionSchema = z
   .object({
     memories: z.array(candidateSchema).max(24),
     relations: z.array(relationSchema).max(32).default([]),
   })
-  .strict();
+  .strip();
 
 export class MemoryExtractionError extends Error {
   constructor(
@@ -64,6 +65,7 @@ export class MemoryExtractionError extends Error {
       | "invalid_output"
       | "empty_batch"
       | "provider_failure",
+    public readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "MemoryExtractionError";
@@ -109,6 +111,7 @@ export class MemoryExtractor {
           ? `Memory provider failed: ${error.message}`
           : "Memory provider failed",
         "provider_failure",
+        error instanceof AIProviderError ? error.retryAfterMs : undefined,
       );
     }
     const parsed = parseMemoryExtraction(
@@ -176,6 +179,7 @@ Scopes:
 
 Use a stable lowercase dotted key such as "preference.editor" or "project.atlas.stack".
 Reuse an existing key when new evidence confirms or corrects it. A changed value should keep the same key so revision history is preserved.
+Output only the fields shown in outputShape. Never copy database-owned metadata such as id, scopeId, version, timestamps, or status from existingMemories.
 content must be concise, standalone, attributed when useful, and must not claim more certainty than the evidence.
 importance is 1-10. confidence is 0-1. Use ttlDays only for genuinely temporary facts.
 evidenceMessageIds must contain only transcript message IDs that directly support the memory.
@@ -377,7 +381,7 @@ function normalizeMemoryIdentity(
   if (
     input.scope === "user"
       ? !input.subjectUserId || !validUsers.has(input.subjectUserId)
-      : input.subjectUserId !== undefined
+      : input.subjectUserId != null
   ) {
     return undefined;
   }

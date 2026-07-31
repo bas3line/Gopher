@@ -29,6 +29,10 @@ const migrations = [
     version: "007_memory_graph",
     path: new URL("./migrations/007_memory_graph.sql", import.meta.url),
   },
+  {
+    version: "008_memory_worker_recovery",
+    path: new URL("./migrations/008_memory_worker_recovery.sql", import.meta.url),
+  },
 ] as const;
 
 export async function migrate(pool: DatabasePool): Promise<void> {

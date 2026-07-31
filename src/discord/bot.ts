@@ -139,6 +139,7 @@ export class DiscordBot {
       memory: MemoryStore;
       musicStore: MusicStore;
       coordinator: Coordinator;
+      semaphore: Semaphore;
       web: WebResearch;
       voice: VoiceSynthesizer;
       voiceChatStt: CloudflareWhisper;
@@ -146,7 +147,7 @@ export class DiscordBot {
       logger: Logger;
     },
   ) {
-    this.semaphore = new Semaphore(dependencies.config.maxConcurrentAIRequests);
+    this.semaphore = dependencies.semaphore;
     this.moderation = new ServerModeration(
       dependencies.coordinator,
       dependencies.logger,
@@ -644,7 +645,7 @@ export class DiscordBot {
               ...imageUrls,
               ...customEmojiImageUrls(cleanContent, serverEmojis),
             ].slice(0, 4),
-            forceWebSearch: false,
+            forceWebSearch: needsWebSearch(cleanContent),
             forceCard: false,
             forceVoice: wantsVoiceReply(cleanContent),
             ambient,
@@ -788,7 +789,8 @@ export class DiscordBot {
               question,
               this.serverEmojis(guildId),
             ),
-            forceWebSearch: interaction.commandName === "search",
+            forceWebSearch:
+              interaction.commandName === "search" || needsWebSearch(question),
             forceCard: interaction.commandName === "card",
             forceVoice:
               interaction.commandName === "voice" || wantsVoiceReply(question),
@@ -1085,9 +1087,8 @@ export class DiscordBot {
 
     const useAgent = config.agent.enabled && !input.ambient && !useVision;
     const shouldSearch =
-      !useAgent &&
       !input.ambient &&
-      (input.forceWebSearch || needsWebSearch(input.question));
+      (input.forceWebSearch || (!useAgent && needsWebSearch(input.question)));
     const casual =
       !shouldSearch &&
       !input.forceWebSearch &&
@@ -1200,7 +1201,7 @@ export class DiscordBot {
                       webEnabled: web.enabled,
                       discordActionsEnabled:
                         config.agent.discordActionsEnabled,
-                      forceWebSearch: input.forceWebSearch,
+                      forceWebSearch: input.forceWebSearch && sources.length === 0,
                     },
                   }
                 : {}),
@@ -1828,7 +1829,12 @@ export class DiscordBot {
 
   private userFacingError(error: unknown): string {
     if (error instanceof AIProviderError) {
-      return "provider died, try again";
+      if (error.status === 429) {
+        return "provider is rate-limited rn. i backed off; try once more in a moment.";
+      }
+      return error.retryable
+        ? "provider is temporarily unavailable. try again in a moment."
+        : "provider returned a bad response. i won't fake an answer.";
     }
     if (error instanceof WebResearchError) {
       return "web search died, not gonna fake it";

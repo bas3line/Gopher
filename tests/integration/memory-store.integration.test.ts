@@ -197,6 +197,57 @@ describe.skipIf(!runIntegrationTests)(
       });
     });
 
+    test("backs off transient memory-provider failures without exhausting the job", async () => {
+      await memory.recordMessage({
+        discordMessageId: "provider-backoff-1",
+        guildId: "guild-1",
+        channelId: "channel-1",
+        userId: "user-1",
+        username: "Kira",
+        role: "user",
+        content: "Atlas uses PostgreSQL.",
+      });
+      const job = await memory.claimMemoryIngestionJob();
+      expect(job).toBeDefined();
+      await memory.failMemoryIngestionJob(job!, "provider_failure", {
+        maxAttempts: 20,
+        retryDelayMs: 120_000,
+      });
+      const pending = await pool.query<{
+        status: string;
+        last_error_code: string;
+        delay_seconds: number;
+      }>(`
+        SELECT
+          status,
+          last_error_code,
+          EXTRACT(EPOCH FROM (available_at - now()))::float AS delay_seconds
+        FROM memory_ingestion_jobs
+        WHERE id = $1
+      `, [job!.id]);
+      expect(pending.rows[0]?.status).toBe("pending");
+      expect(pending.rows[0]?.last_error_code).toBe("provider_failure");
+      expect(pending.rows[0]?.delay_seconds).toBeGreaterThan(110);
+
+      await pool.query(
+        "UPDATE memory_ingestion_jobs SET attempts = 20, status = 'processing' WHERE id = $1",
+        [job!.id],
+      );
+      await memory.failMemoryIngestionJob(job!, "provider_failure", {
+        maxAttempts: 20,
+        retryDelayMs: 120_000,
+      });
+      const exhausted = await pool.query<{
+        status: string;
+        completed: boolean;
+      }>(`
+        SELECT status, completed_at IS NOT NULL AS completed
+        FROM memory_ingestion_jobs
+        WHERE id = $1
+      `, [job!.id]);
+      expect(exhausted.rows[0]).toEqual({ status: "failed", completed: true });
+    });
+
     test("revises, scopes, retrieves, audits, and forgets typed memory", async () => {
       await memory.recordMessage({
         discordMessageId: "evidence-1",

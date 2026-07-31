@@ -1,4 +1,5 @@
 import type { Logger } from "../logger.ts";
+import type { Semaphore } from "../infra/coordinator.ts";
 import { MemoryExtractor, MemoryExtractionError } from "./extractor.ts";
 import { MemoryStore } from "./store.ts";
 import type { MemoryIngestionJob } from "./types.ts";
@@ -13,8 +14,11 @@ export class MemoryWorker {
       extractor: MemoryExtractor;
       model: string;
       logger: Logger;
+      semaphore: Semaphore;
       batchSize?: number;
       idlePollMs?: number;
+      startupDelayMs?: number;
+      successIntervalMs?: number;
     },
   ) {}
 
@@ -33,10 +37,23 @@ export class MemoryWorker {
   }
 
   private async loop(signal: AbortSignal): Promise<void> {
+    const startupDelayMs = this.dependencies.startupDelayMs ?? 0;
+    let consecutiveProviderFailures = 0;
+    if (startupDelayMs > 0) {
+      await abortableSleep(startupDelayMs, signal);
+    }
     while (!signal.aborted) {
       let job: MemoryIngestionJob | undefined;
+      let providerCallSucceeded = false;
       try {
-        job = await this.dependencies.store.claimMemoryIngestionJob();
+        await this.dependencies.semaphore.use(
+          async () => {
+            job = await this.dependencies.store.claimMemoryIngestionJob();
+            if (job) providerCallSucceeded = await this.process(job);
+          },
+          signal,
+          -1,
+        );
         if (!job) {
           await abortableSleep(
             this.dependencies.idlePollMs ?? 750,
@@ -44,7 +61,11 @@ export class MemoryWorker {
           );
           continue;
         }
-        await this.process(job);
+        if (providerCallSucceeded) consecutiveProviderFailures = 0;
+        await abortableSleep(
+          this.dependencies.successIntervalMs ?? 5_000,
+          signal,
+        );
       } catch (error) {
         if (signal.aborted) return;
         this.dependencies.logger.warn(
@@ -58,14 +79,29 @@ export class MemoryWorker {
           "memory consolidation worker iteration failed",
         );
         if (job) {
+          const providerFailure =
+            error instanceof MemoryExtractionError &&
+            error.code === "provider_failure";
+          consecutiveProviderFailures = providerFailure
+            ? consecutiveProviderFailures + 1
+            : 0;
+          const policy = memoryFailurePolicy(
+            error,
+            job.attempts,
+            consecutiveProviderFailures,
+          );
           await this.dependencies.store
-            .failMemoryIngestionJob(job, errorCode(error))
+            .failMemoryIngestionJob(job, errorCode(error), {
+              maxAttempts: policy.maxAttempts,
+              retryDelayMs: policy.retryDelayMs,
+            })
             .catch((failure) => {
               this.dependencies.logger.error(
                 { err: failure, jobId: job?.id },
                 "could not release failed memory ingestion job",
               );
             });
+          await abortableSleep(policy.workerCooldownMs, signal);
         } else {
           await abortableSleep(1_000, signal);
         }
@@ -73,7 +109,7 @@ export class MemoryWorker {
     }
   }
 
-  private async process(job: MemoryIngestionJob): Promise<void> {
+  private async process(job: MemoryIngestionJob): Promise<boolean> {
     const batch = await this.dependencies.store.memoryIngestionBatch(
       job,
       this.dependencies.batchSize ?? 32,
@@ -87,7 +123,7 @@ export class MemoryWorker {
         ),
         reachedTarget: true,
       });
-      return;
+      return false;
     }
 
     const startedAt = performance.now();
@@ -108,7 +144,9 @@ export class MemoryWorker {
       relations: extraction.relations,
     });
     const lastMessage = batch.messages.at(-1);
-    if (!lastMessage) return;
+    if (!lastMessage) {
+      throw new Error("memory ingestion batch lost its final message");
+    }
     await this.dependencies.store.finishMemoryIngestion({
       job,
       lastProcessedMessageId: lastMessage.id,
@@ -129,8 +167,62 @@ export class MemoryWorker {
         ? { completionTokens: extraction.completionTokens }
         : {}),
     });
+    return true;
   }
 }
+
+export interface MemoryFailurePolicy {
+  maxAttempts: number;
+  retryDelayMs: number;
+  workerCooldownMs: number;
+}
+
+export function memoryFailurePolicy(
+  error: unknown,
+  attempts: number,
+  consecutiveProviderFailures = attempts,
+): MemoryFailurePolicy {
+  const boundedAttempt = Math.max(1, Math.min(attempts, 20));
+  if (error instanceof MemoryExtractionError) {
+    if (error.code === "provider_failure") {
+      const boundedFailureStreak = Math.max(
+        1,
+        Math.min(consecutiveProviderFailures, 20),
+      );
+      const exponentialDelay = 30_000 * 2 ** (boundedFailureStreak - 1);
+      const delay = clampDelay(
+        Math.max(exponentialDelay, error.retryAfterMs ?? 0),
+        30_000,
+        300_000,
+      );
+      return {
+        maxAttempts: 20,
+        retryDelayMs: delay,
+        workerCooldownMs: delay,
+      };
+    }
+    if (error.code === "invalid_output") {
+      const delay = clampDelay(
+        15_000 * 2 ** (boundedAttempt - 1),
+        15_000,
+        300_000,
+      );
+      return {
+        maxAttempts: 3,
+        retryDelayMs: delay,
+        workerCooldownMs: Math.min(delay, 60_000),
+      };
+    }
+    return { maxAttempts: 1, retryDelayMs: 60_000, workerCooldownMs: 60_000 };
+  }
+  return { maxAttempts: 5, retryDelayMs: 30_000, workerCooldownMs: 30_000 };
+}
+
+function clampDelay(value: number, minimum: number, maximum: number): number {
+  if (!Number.isFinite(value)) return maximum;
+  return Math.round(Math.max(minimum, Math.min(value, maximum)));
+}
+
 function errorCode(error: unknown): string {
   if (error instanceof MemoryExtractionError) return error.code;
   if (error instanceof Error) return error.name.toLowerCase();

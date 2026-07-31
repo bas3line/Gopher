@@ -105,6 +105,47 @@ describe("durable memory extraction", () => {
     expect(result.relations).toEqual([]);
   });
 
+  test("strips provider-copied database metadata without weakening grounding", () => {
+    const result = parseMemoryExtraction(
+      JSON.stringify({
+        requestId: "provider-owned-metadata",
+        memories: [
+          {
+            id: 42,
+            scope: "guild",
+            scopeId: "guild",
+            subjectUserId: null,
+            kind: "decision",
+            key: "project.atlas.database",
+            content: "Project Atlas uses PostgreSQL.",
+            importance: 9,
+            confidence: 0.92,
+            version: 3,
+            status: "active",
+            evidenceMessageIds: ["discord-10"],
+            reason: "A durable project decision was stated directly.",
+          },
+        ],
+        relations: [],
+      }),
+      transcript,
+      ["user-1"],
+    );
+
+    expect(result.candidates).toEqual([
+      {
+        scope: "guild",
+        kind: "decision",
+        key: "project.atlas.database",
+        content: "Project Atlas uses PostgreSQL.",
+        importance: 9,
+        confidence: 0.92,
+        evidenceMessageIds: ["discord-10"],
+        reason: "A durable project decision was stated directly.",
+      },
+    ]);
+  });
+
   test("drops ungrounded users, invented evidence, and credential material", () => {
     const result = parseMemoryExtraction(
       JSON.stringify({

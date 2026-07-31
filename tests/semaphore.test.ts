@@ -37,3 +37,27 @@ test("semaphore removes an aborted waiter without consuming capacity", async () 
     "available",
   );
 });
+
+test("semaphore lets queued foreground AI work pass background memory work", async () => {
+  const semaphore = new Semaphore(1);
+  const order: string[] = [];
+  let releaseActive!: () => void;
+  const active = semaphore.use(
+    () =>
+      new Promise<void>((resolve) => {
+        releaseActive = resolve;
+      }),
+  );
+  await Bun.sleep(0);
+
+  const background = semaphore.use(async () => {
+    order.push("background");
+  }, undefined, -1);
+  const foreground = semaphore.use(async () => {
+    order.push("foreground");
+  });
+  releaseActive();
+
+  await Promise.all([active, background, foreground]);
+  expect(order).toEqual(["foreground", "background"]);
+});

@@ -163,6 +163,7 @@ export class Semaphore {
   private active = 0;
   private readonly waiting: Array<{
     resume: () => void;
+    priority: number;
     signal?: AbortSignal;
     abort?: () => void;
   }> = [];
@@ -172,6 +173,7 @@ export class Semaphore {
   async use<T>(
     operation: () => Promise<T>,
     signal?: AbortSignal,
+    priority = 0,
   ): Promise<T> {
     if (signal?.aborted) {
       throw new DOMException("Semaphore wait was aborted", "AbortError");
@@ -180,6 +182,7 @@ export class Semaphore {
       await new Promise<void>((resolve, reject) => {
         const waiter: {
           resume: () => void;
+          priority: number;
           signal?: AbortSignal;
           abort?: () => void;
         } = {
@@ -187,6 +190,7 @@ export class Semaphore {
             waiter.signal?.removeEventListener("abort", waiter.abort!);
             resolve();
           },
+          priority,
           ...(signal ? { signal } : {}),
         };
         if (signal) {
@@ -199,7 +203,11 @@ export class Semaphore {
           };
           signal.addEventListener("abort", waiter.abort, { once: true });
         }
-        this.waiting.push(waiter);
+        const insertionIndex = this.waiting.findIndex(
+          (queued) => queued.priority < priority,
+        );
+        if (insertionIndex === -1) this.waiting.push(waiter);
+        else this.waiting.splice(insertionIndex, 0, waiter);
       });
     }
     if (signal?.aborted) {

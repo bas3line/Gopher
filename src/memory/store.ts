@@ -1826,19 +1826,30 @@ export class MemoryStore {
   async failMemoryIngestionJob(
     job: MemoryIngestionJob,
     errorCode: string,
+    options: { maxAttempts?: number; retryDelayMs?: number } = {},
   ): Promise<void> {
+    const maxAttempts = Math.max(1, Math.min(options.maxAttempts ?? 5, 100));
+    const retryDelayMs = Math.max(
+      1_000,
+      Math.min(options.retryDelayMs ?? 30_000, 3_600_000),
+    );
     await this.pool.query(
       `
         UPDATE memory_ingestion_jobs
-        SET status = CASE WHEN attempts >= 5 THEN 'failed' ELSE 'pending' END,
+        SET status = CASE WHEN attempts >= $3 THEN 'failed' ELSE 'pending' END,
             available_at = now()
-              + LEAST(300, power(2, attempts)::integer) * interval '1 second',
+              + $4 * interval '1 millisecond',
             locked_at = NULL,
             last_error_code = $2,
-            completed_at = CASE WHEN attempts >= 5 THEN now() ELSE NULL END
+            completed_at = CASE WHEN attempts >= $3 THEN now() ELSE NULL END
         WHERE id = $1
       `,
-      [job.id, errorCode.replace(/[^a-z0-9_.:-]/gi, "_").slice(0, 120)],
+      [
+        job.id,
+        errorCode.replace(/[^a-z0-9_.:-]/gi, "_").slice(0, 120),
+        maxAttempts,
+        retryDelayMs,
+      ],
     );
   }
 

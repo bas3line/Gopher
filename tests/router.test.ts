@@ -160,6 +160,12 @@ describe("Discord response routing", () => {
 
   test("detects research and card intent", () => {
     expect(needsWebSearch("what is the latest stable Go version?")).toBeTrue();
+    expect(
+      needsWebSearch(
+        "so what do you think about my website https://yshubham.com/",
+      ),
+    ).toBeTrue();
+    expect(needsWebSearch("review my portfolio website")).toBeTrue();
     expect(needsWebSearch("tell me a bad joke")).toBeFalse();
     expect(wantsImageCard("make me a cursed verdict card")).toBeTrue();
   });

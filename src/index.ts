@@ -5,7 +5,7 @@ import { createDatabasePool } from "./db/pool.ts";
 import { migrate } from "./db/migrate.ts";
 import { DiscordBot } from "./discord/bot.ts";
 import { startHealthServer } from "./health.ts";
-import { Coordinator } from "./infra/coordinator.ts";
+import { Coordinator, Semaphore } from "./infra/coordinator.ts";
 import { createLogger } from "./logger.ts";
 import { MemoryStore } from "./memory/store.ts";
 import { MemoryExtractor } from "./memory/extractor.ts";
@@ -30,6 +30,7 @@ if (!config.discordToken) {
 
 const pool = createDatabasePool(config.databaseUrl, logger);
 const coordinator = new Coordinator(config.redisUrl);
+const aiSemaphore = new Semaphore(config.maxConcurrentAIRequests);
 const embeddingAI = config.embedding
   ? new OpenAIEmbeddingClient({
       ...config.embedding,
@@ -47,6 +48,7 @@ const textAI = new AIClient({
   maxTokens: config.text.maxTokens,
   reasoningEffort: config.text.reasoningEffort,
   logger,
+  maxRetries: 4,
 });
 const summaryAI = new AIClient({
   endpoint: config.text.endpoint,
@@ -56,6 +58,7 @@ const summaryAI = new AIClient({
   temperature: 0.2,
   acceptTruncatedOutput: true,
   logger,
+  maxRetries: 1,
 });
 const memoryAI = new AIClient({
   endpoint: config.text.endpoint,
@@ -64,6 +67,7 @@ const memoryAI = new AIClient({
   reasoningEffort: config.text.reasoningEffort,
   temperature: 0.1,
   logger,
+  maxRetries: 0,
 });
 const visionAI = new AIClient({
   endpoint: config.openAI.baseUrl,
@@ -121,8 +125,11 @@ const memoryWorker = new MemoryWorker({
   }),
   model: config.text.model,
   logger,
+  semaphore: aiSemaphore,
   batchSize: config.memory.batchSize,
   idlePollMs: config.memory.pollMs,
+  startupDelayMs: 15_000,
+  successIntervalMs: 5_000,
 });
 const memoryEmbeddingWorker = embeddingAI
   ? new MemoryEmbeddingWorker({
@@ -141,6 +148,7 @@ const bot = new DiscordBot({
   memory,
   musicStore,
   coordinator,
+  semaphore: aiSemaphore,
   web,
   voice,
   voiceChatStt,
@@ -154,17 +162,6 @@ let shuttingDown = false;
 async function start(): Promise<void> {
   await migrate(pool);
   logger.info("database migrations complete");
-  if (config.memory.workerEnabled) {
-    memoryWorker.start();
-    logger.info("durable memory consolidation worker started");
-  }
-  if (memoryEmbeddingWorker) {
-    memoryEmbeddingWorker.start();
-    logger.info(
-      { model: embeddingAI?.model, dimensions: embeddingAI?.dimensions },
-      "semantic memory embedding worker started",
-    );
-  }
   await coordinator.connect();
   logger.info("Redis coordination ready");
   await bot.start(config.discordToken!);
@@ -175,6 +172,20 @@ async function start(): Promise<void> {
     discordReady: () => bot.ready,
     logger,
   });
+  if (config.memory.workerEnabled) {
+    memoryWorker.start();
+    logger.info(
+      { startupDelayMs: 15_000, successIntervalMs: 5_000 },
+      "durable memory consolidation worker started",
+    );
+  }
+  if (memoryEmbeddingWorker) {
+    memoryEmbeddingWorker.start();
+    logger.info(
+      { model: embeddingAI?.model, dimensions: embeddingAI?.dimensions },
+      "semantic memory embedding worker started",
+    );
+  }
 }
 
 async function shutdown(signal: string): Promise<void> {

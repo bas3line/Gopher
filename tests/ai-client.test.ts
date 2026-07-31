@@ -3,6 +3,7 @@ import pino from "pino";
 import {
   AIClient,
   AIProviderError,
+  retryAfterMilliseconds,
   sanitizeModelOutput,
 } from "../src/ai/client.ts";
 
@@ -126,7 +127,41 @@ describe("OpenAI-compatible client", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(AIProviderError);
       expect((error as AIProviderError).retryable).toBeFalse();
+      expect((error as AIProviderError).status).toBe(401);
     }
+  });
+
+  test("honors rate-limit metadata and retries a foreground request", async () => {
+    let requests = 0;
+    const endpoint = startServer(() => {
+      requests += 1;
+      if (requests === 1) {
+        return new Response(null, {
+          status: 429,
+          headers: { "retry-after": "0" },
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: "recovered" } }],
+      });
+    });
+    const client = new AIClient({
+      endpoint,
+      apiKey: "local-test-key",
+      maxTokens: 2_400,
+      logger: pino({ level: "silent" }),
+      maxRetries: 1,
+      retryBaseDelayMs: 1,
+      maxRetryDelayMs: 5,
+    });
+    await expect(
+      client.complete([{ role: "user", content: "hello" }], "fun-model"),
+    ).resolves.toMatchObject({ content: "recovered" });
+    expect(requests).toBe(2);
+    expect(retryAfterMilliseconds("2.5", 0)).toBe(2_500);
+    expect(
+      retryAfterMilliseconds("Thu, 01 Jan 1970 00:00:05 GMT", 1_000),
+    ).toBe(4_000);
   });
 
   test("preserves parallel tool calls and sends the documented tool controls", async () => {

@@ -65,6 +65,10 @@ export function stripBotMention(content: string, botUserId: string): string {
 
 export function needsWebSearch(content: string): boolean {
   return (
+    /https?:\/\/[^\s<>]+/i.test(content) ||
+    /\b(?:review|inspect|check|critique|thoughts? on|what do you think (?:of|about))\b.{0,80}\b(?:website|site|webpage|portfolio)\b/i.test(
+      content,
+    ) ||
     /\b(search (the )?web|web ?search|look (it )?up|google it|find sources?|cite sources?)\b/i.test(
       content,
     ) ||
