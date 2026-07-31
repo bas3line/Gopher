@@ -230,6 +230,18 @@ const configSchema = z
       .transform((value) => value === "true"),
     MEMORY_BATCH_SIZE: z.coerce.number().int().min(4).max(100).default(32),
     MEMORY_POLL_MS: z.coerce.number().int().min(100).max(10_000).default(750),
+    MEMORY_STARTUP_DELAY_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(300_000)
+      .default(15_000),
+    MEMORY_SUCCESS_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(5_000)
+      .max(300_000)
+      .default(30_000),
     MEMORY_RECALL_COUNT: z.coerce.number().int().min(4).max(30).default(12),
     LOG_LEVEL: z
       .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
@@ -369,6 +381,8 @@ export interface AppConfig {
     workerEnabled: boolean;
     batchSize: number;
     pollMs: number;
+    startupDelayMs: number;
+    successIntervalMs: number;
     recallCount: number;
   };
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
@@ -476,6 +490,8 @@ export function loadConfig(
       workerEnabled: value.MEMORY_WORKER_ENABLED,
       batchSize: value.MEMORY_BATCH_SIZE,
       pollMs: value.MEMORY_POLL_MS,
+      startupDelayMs: value.MEMORY_STARTUP_DELAY_MS,
+      successIntervalMs: value.MEMORY_SUCCESS_INTERVAL_MS,
       recallCount: value.MEMORY_RECALL_COUNT,
     },
     logLevel: value.LOG_LEVEL,

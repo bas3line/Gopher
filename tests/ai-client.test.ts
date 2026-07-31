@@ -138,7 +138,7 @@ describe("OpenAI-compatible client", () => {
       if (requests === 1) {
         return new Response(null, {
           status: 429,
-          headers: { "retry-after": "0" },
+          headers: { "retry-after": "0.001" },
         });
       }
       return Response.json({
@@ -151,7 +151,7 @@ describe("OpenAI-compatible client", () => {
       maxTokens: 2_400,
       logger: pino({ level: "silent" }),
       maxRetries: 1,
-      retryBaseDelayMs: 1,
+      retryBaseDelayMs: 2,
       maxRetryDelayMs: 5,
     });
     await expect(

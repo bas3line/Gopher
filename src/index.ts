@@ -47,8 +47,10 @@ const textAI = new AIClient({
   apiKey: config.text.apiKey,
   maxTokens: config.text.maxTokens,
   reasoningEffort: config.text.reasoningEffort,
-  logger,
+  logger: logger.child({ aiWorkload: "foreground" }),
   maxRetries: 4,
+  retryBaseDelayMs: 2_000,
+  maxRetryDelayMs: 30_000,
 });
 const summaryAI = new AIClient({
   endpoint: config.text.endpoint,
@@ -57,7 +59,7 @@ const summaryAI = new AIClient({
   reasoningEffort: config.text.reasoningEffort,
   temperature: 0.2,
   acceptTruncatedOutput: true,
-  logger,
+  logger: logger.child({ aiWorkload: "summary" }),
   maxRetries: 1,
 });
 const memoryAI = new AIClient({
@@ -66,14 +68,14 @@ const memoryAI = new AIClient({
   maxTokens: config.text.memoryMaxTokens,
   reasoningEffort: config.text.reasoningEffort,
   temperature: 0.1,
-  logger,
+  logger: logger.child({ aiWorkload: "memory" }),
   maxRetries: 0,
 });
 const visionAI = new AIClient({
   endpoint: config.openAI.baseUrl,
   apiKey: config.openAI.apiKey,
   maxTokens: config.openAI.maxTokens,
-  logger,
+  logger: logger.child({ aiWorkload: "vision" }),
 });
 const web = new WebResearch(
   config.firecrawlApiKey,
@@ -128,8 +130,8 @@ const memoryWorker = new MemoryWorker({
   semaphore: aiSemaphore,
   batchSize: config.memory.batchSize,
   idlePollMs: config.memory.pollMs,
-  startupDelayMs: 15_000,
-  successIntervalMs: 5_000,
+  startupDelayMs: config.memory.startupDelayMs,
+  successIntervalMs: config.memory.successIntervalMs,
 });
 const memoryEmbeddingWorker = embeddingAI
   ? new MemoryEmbeddingWorker({
@@ -175,7 +177,10 @@ async function start(): Promise<void> {
   if (config.memory.workerEnabled) {
     memoryWorker.start();
     logger.info(
-      { startupDelayMs: 15_000, successIntervalMs: 5_000 },
+      {
+        startupDelayMs: config.memory.startupDelayMs,
+        successIntervalMs: config.memory.successIntervalMs,
+      },
       "durable memory consolidation worker started",
     );
   }

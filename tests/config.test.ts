@@ -103,6 +103,8 @@ describe("configuration", () => {
       workerEnabled: true,
       batchSize: 32,
       pollMs: 750,
+      startupDelayMs: 15_000,
+      successIntervalMs: 30_000,
       recallCount: 12,
     });
   });

@@ -273,8 +273,8 @@ export class AIClient implements AgentCompletionClient {
           (this.options.retryBaseDelayMs ?? 750) * 2 ** attempt +
           Math.floor(Math.random() * 200);
         const delay = Math.min(
-          this.options.maxRetryDelayMs ?? 15_000,
-          Math.max(100, error.retryAfterMs ?? fallbackDelay),
+          this.options.maxRetryDelayMs ?? 30_000,
+          Math.max(100, fallbackDelay, error.retryAfterMs ?? 0),
         );
         await abortableSleep(delay, signal);
       }
