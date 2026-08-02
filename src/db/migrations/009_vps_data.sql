@@ -1,4 +1,3 @@
-go-senior-discord-bot-postgres-1
 --
 -- PostgreSQL database dump
 --
@@ -13219,5 +13218,5 @@ ALTER TABLE ONLY public.memory_links
 -- PostgreSQL database dump complete
 --
 
-\unrestrict YYa0GpnXFE20HOCxQtGCQDSCMi5iRESqy2Vk5dnSEHyvchxVbdJbiB7pg1vXQKR
+\unrestrict yZd66QBFPoacjE2bCefhXvxlTOkASDhdqGqZE8RXpgYk2J7Cxu25yrg0yqOc1gD
 
