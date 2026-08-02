@@ -139,7 +139,11 @@ const configSchema = z
     OPENROUTER_FISH_AUDIO_MODEL: z
       .string()
       .regex(/^[a-z0-9._-]+\/[a-z0-9._-]+(:free)?$/i)
-      .default("fish-audio/s2.1-pro"),
+      .default("hexgrad/kokoro-82m"),
+    OPENROUTER_VOICE: z
+      .string()
+      .min(1)
+      .default("af_heart"),
     MUSIC_ENABLED: z
       .enum(["true", "false"])
       .default("false")
@@ -358,6 +362,7 @@ export interface AppConfig {
     apiKey?: string;
     referenceId: string;
     model: string;
+    voice: string;
     maxCharacters: number;
   };
   music: {
@@ -474,6 +479,7 @@ export function loadConfig(
       ...(value.OPENROUTER_API_KEY ? { apiKey: value.OPENROUTER_API_KEY } : {}),
       referenceId: value.FISH_AUDIO_REFERENCE_ID,
       model: value.OPENROUTER_FISH_AUDIO_MODEL,
+      voice: value.OPENROUTER_VOICE,
       maxCharacters: value.FISH_AUDIO_MAX_CHARACTERS,
     },
     music: {
