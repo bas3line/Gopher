@@ -397,6 +397,41 @@ export const commandData = [
             .setMaxLength(512),
         ),
     ),
+  new SlashCommandBuilder()
+    .setName("whitelist")
+    .setDescription("Owner-only: manage the guild allowlist")
+    .setDMPermission(false)
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("add")
+        .setDescription("Add a guild to the allowlist")
+        .addStringOption((option) =>
+          option
+            .setName("guild_id")
+            .setDescription("Discord guild/server ID")
+            .setRequired(true)
+            .setMinLength(17)
+            .setMaxLength(20),
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("remove")
+        .setDescription("Remove a guild from the allowlist")
+        .addStringOption((option) =>
+          option
+            .setName("guild_id")
+            .setDescription("Discord guild/server ID")
+            .setRequired(true)
+            .setMinLength(17)
+            .setMaxLength(20),
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("list")
+        .setDescription("Show all allowed guilds"),
+    ),
 ].map((command) => command.toJSON());
 
 export const aboutText =

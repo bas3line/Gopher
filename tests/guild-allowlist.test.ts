@@ -1,18 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import {
-  ALLOWED_GUILD_ID,
+  allowedGuildIds,
   enforceGuildAllowlist,
   isAllowedGuildId,
   leaveIfDisallowedGuild,
   shouldHandleGuildContext,
 } from "../src/discord/guild-allowlist.ts";
 
+const TEST_GUILD_ID = "1515356172092178512";
+
 describe("Discord guild allowlist", () => {
   test("keeps only the explicitly allowed guild while preserving DMs", () => {
-    expect(ALLOWED_GUILD_ID).toBe("1515356172092178512");
-    expect(isAllowedGuildId(ALLOWED_GUILD_ID)).toBeTrue();
+    expect(isAllowedGuildId(TEST_GUILD_ID)).toBeTrue();
     expect(isAllowedGuildId("111111111111111111")).toBeFalse();
-    expect(shouldHandleGuildContext(ALLOWED_GUILD_ID)).toBeTrue();
+    expect(shouldHandleGuildContext(TEST_GUILD_ID)).toBeTrue();
     expect(shouldHandleGuildContext(null)).toBeTrue();
     expect(shouldHandleGuildContext(undefined)).toBeTrue();
     expect(shouldHandleGuildContext("111111111111111111")).toBeFalse();
@@ -31,7 +32,7 @@ describe("Discord guild allowlist", () => {
     ).toBeTrue();
     expect(
       await leaveIfDisallowedGuild({
-        id: ALLOWED_GUILD_ID,
+        id: TEST_GUILD_ID,
         leave: async () => {
           allowedLeaveCalls += 1;
         },
@@ -51,7 +52,7 @@ describe("Discord guild allowlist", () => {
         },
       },
       {
-        id: ALLOWED_GUILD_ID,
+        id: TEST_GUILD_ID,
         leave: async () => {
           throw new Error("allowed guild must never be left");
         },

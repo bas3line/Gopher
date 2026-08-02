@@ -92,9 +92,11 @@ import {
   memoryScopeSchema,
 } from "../memory/types.ts";
 import {
-  ALLOWED_GUILD_ID,
+  addGuildToAllowlist,
+  allowedGuildIds,
   enforceGuildAllowlist,
   leaveIfDisallowedGuild,
+  removeGuildFromAllowlist,
   shouldHandleGuildContext,
 } from "./guild-allowlist.ts";
 
@@ -241,7 +243,7 @@ export class DiscordBot {
       }
       this.dependencies.logger.info(
         {
-          allowedGuildId: ALLOWED_GUILD_ID,
+          allowedGuildIds: allowedGuildIds(),
           allowedGuildPresent: allowlistResult.allowedGuildPresent,
           leftGuildIds: allowlistResult.leftGuildIds,
           failedGuilds: allowlistResult.failures.length,
@@ -265,7 +267,8 @@ export class DiscordBot {
           "failed to register Discord commands",
         );
       }
-      const allowedGuild = readyClient.guilds.cache.get(ALLOWED_GUILD_ID);
+      const primaryGuildId = this.dependencies.config.guildIds[0]!;
+      const allowedGuild = readyClient.guilds.cache.get(primaryGuildId);
       await this.refreshServerEmojis(allowedGuild ? [allowedGuild] : []);
     });
     this.client.on(Events.GuildCreate, (guild) => {
@@ -390,12 +393,13 @@ export class DiscordBot {
     // guild makes Discord clients show duplicate command entries.
     await this.client.application.commands.set([]);
 
-    const guild = await this.client.guilds.fetch(ALLOWED_GUILD_ID);
+    const primaryGuildId = this.dependencies.config.guildIds[0]!;
+    const guild = await this.client.guilds.fetch(primaryGuildId);
     await this.registerGuildCommands(guild);
     this.dependencies.logger.info(
       {
         globalCommandsCleared: true,
-        guildId: ALLOWED_GUILD_ID,
+        guildId: primaryGuildId,
       },
       "refreshed Discord commands for the allowed guild",
     );
@@ -404,7 +408,7 @@ export class DiscordBot {
   private async handleGuildCreate(guild: Guild): Promise<void> {
     if (await leaveIfDisallowedGuild(guild)) {
       this.dependencies.logger.warn(
-        { guildId: guild.id, allowedGuildId: ALLOWED_GUILD_ID },
+        { guildId: guild.id, allowedGuildIds: allowedGuildIds() },
         "left a newly joined guild outside the allowlist",
       );
       return;
@@ -715,6 +719,10 @@ export class DiscordBot {
       await this.moderation.begin(interaction);
       return;
     }
+    if (interaction.commandName === "whitelist") {
+      await this.handleWhitelist(interaction);
+      return;
+    }
     if (interaction.commandName === "about") {
       await interaction.reply({
         content: aboutText,
@@ -855,6 +863,65 @@ export class DiscordBot {
         "failed to handle Discord interaction",
       );
       await interaction.editReply(this.userFacingError(error));
+    }
+  }
+
+  private async handleWhitelist(
+    interaction: ChatInputCommandInteraction,
+  ): Promise<void> {
+    const isOwner = this.dependencies.config.ownerUserIds.includes(
+      interaction.user.id,
+    );
+    if (!isOwner) {
+      await interaction.reply({
+        content: "this command is restricted to the bot owner.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const subcommand = interaction.options.getSubcommand();
+    if (subcommand === "list") {
+      const ids = allowedGuildIds();
+      await interaction.reply({
+        content: `**Allowed guilds (${ids.length})**\n${ids.map((id) => `\`${id}\``).join("\n")}`,
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
+
+    const guildId = interaction.options.getString("guild_id", true);
+    if (!/^\d{17,20}$/.test(guildId)) {
+      await interaction.reply({
+        content: "that doesn't look like a valid guild ID.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      if (subcommand === "add") {
+        const added = await addGuildToAllowlist(guildId, interaction.user.id);
+        await interaction.editReply({
+          content: added
+            ? `✅ guild \`${guildId}\` added to the allowlist.`
+            : `guild \`${guildId}\` is already in the allowlist.`,
+          allowedMentions: { parse: [] },
+        });
+      } else if (subcommand === "remove") {
+        const removed = await removeGuildFromAllowlist(guildId);
+        await interaction.editReply({
+          content: removed
+            ? `✅ guild \`${guildId}\` removed from the allowlist.`
+            : `guild \`${guildId}\` was not found in the allowlist (or is a config guild).`,
+          allowedMentions: { parse: [] },
+        });
+      }
+    } catch (error) {
+      this.dependencies.logger.warn({ err: error, guildId }, "whitelist command failed");
+      await interaction.editReply("something went wrong updating the allowlist.");
     }
   }
 

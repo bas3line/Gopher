@@ -4,6 +4,11 @@ import { loadConfig } from "./config.ts";
 import { createDatabasePool } from "./db/pool.ts";
 import { migrate } from "./db/migrate.ts";
 import { DiscordBot } from "./discord/bot.ts";
+import {
+  initAllowlist,
+  loadDbAllowlist,
+} from "./discord/guild-allowlist.ts";
+import { createDiscordLogStream } from "./discord/webhook-logger.ts";
 import { startHealthServer } from "./health.ts";
 import { Coordinator, Semaphore } from "./infra/coordinator.ts";
 import { createLogger } from "./logger.ts";
@@ -20,7 +25,32 @@ import { OpenRouterFishVoice } from "./voice/openrouter-fish.ts";
 import { WebResearch } from "./web/firecrawl.ts";
 
 const config = loadConfig();
-const logger = createLogger(config);
+
+function parseWebhookUrls(raw?: string) {
+  if (!raw) return [];
+  return raw.split(",").map((pair) => {
+    const eqIdx = pair.indexOf("=");
+    if (eqIdx < 1) return null;
+    return {
+      name: pair.slice(0, eqIdx).trim(),
+      webhookUrl: pair.slice(eqIdx + 1).trim(),
+    };
+  }).filter((entry): entry is { name: string; webhookUrl: string } =>
+    entry !== null && entry.webhookUrl.length > 0,
+  );
+}
+
+const webhookUrls = parseWebhookUrls(process.env.WEBHOOK_URLS);
+const extraStreams: Array<{ write: (s: string) => void }> = [];
+if (webhookUrls.length > 0) {
+  extraStreams.push(createDiscordLogStream(webhookUrls, null!));
+}
+
+const logger = createLogger(config, extraStreams as unknown as Array<import("node:stream").Writable>);
+
+if (webhookUrls.length > 0) {
+  logger.info({ channels: webhookUrls.map((w) => w.name) }, "discord webhook logging enabled");
+}
 
 if (!config.discordToken) {
   logger.fatal(
@@ -118,10 +148,10 @@ const voiceChatVoice = new CloudflareAuraVoice({
   logger,
 });
 const voice = new FallbackVoice({
-  primary: openRouterVoice,
-  fallback: cloudflareVoice,
-  primaryName: "OpenRouter Fish Audio (free)",
-  fallbackName: "Cloudflare Aura-2 Amalthea",
+  primary: cloudflareVoice,
+  fallback: openRouterVoice,
+  primaryName: "Cloudflare Aura-2 Amalthea",
+  fallbackName: "OpenRouter Fish Audio (free)",
   logger,
 });
 const memoryWorker = new MemoryWorker({
@@ -169,6 +199,8 @@ let shuttingDown = false;
 async function start(): Promise<void> {
   await migrate(pool);
   logger.info("database migrations complete");
+  initAllowlist(pool, config.guildIds as string[]);
+  await loadDbAllowlist();
   await coordinator.connect();
   logger.info("Redis coordination ready");
   await bot.start(config.discordToken!);

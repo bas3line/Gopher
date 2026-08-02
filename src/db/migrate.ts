@@ -37,6 +37,10 @@ const migrations = [
     version: "009_data_imported",
     path: new URL("./migrations/009_data_imported.sql", import.meta.url),
   },
+  {
+    version: "010_guild_allowlist",
+    path: new URL("./migrations/010_guild_allowlist.sql", import.meta.url),
+  },
 ] as const;
 
 export async function migrate(pool: DatabasePool): Promise<void> {

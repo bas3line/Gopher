@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ALLOWED_GUILD_ID } from "./discord/guild-policy.ts";
+import { DEFAULT_ALLOWED_GUILD_IDS } from "./discord/guild-policy.ts";
 
 const optionalTrimmed = z
   .string()
@@ -12,7 +12,10 @@ const configSchema = z
       .enum(["development", "test", "production"])
       .default("development"),
     DISCORD_TOKEN: optionalTrimmed,
-    DISCORD_GUILD_ID: z.literal(ALLOWED_GUILD_ID).default(ALLOWED_GUILD_ID),
+    DISCORD_GUILD_ID: z
+      .string()
+      .regex(/^(?:\d{17,20}(?:\s*,\s*\d{17,20})*)?$/)
+      .default(DEFAULT_ALLOWED_GUILD_IDS.join(",")),
     BOT_OWNER_USER_IDS: z
       .string()
       .trim()
@@ -305,7 +308,7 @@ const configSchema = z
 export interface AppConfig {
   nodeEnv: "development" | "test" | "production";
   discordToken?: string;
-  discordGuildId: typeof ALLOWED_GUILD_ID;
+  guildIds: readonly string[];
   ownerUserIds: readonly string[];
   text: {
     endpoint: string;
@@ -408,7 +411,10 @@ export function loadConfig(
   return {
     nodeEnv: value.NODE_ENV,
     ...(value.DISCORD_TOKEN ? { discordToken: value.DISCORD_TOKEN } : {}),
-    discordGuildId: value.DISCORD_GUILD_ID,
+    guildIds: value.DISCORD_GUILD_ID
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean),
     ownerUserIds: value.BOT_OWNER_USER_IDS
       ? [...new Set(value.BOT_OWNER_USER_IDS.split(",").map((id) => id.trim()))]
       : [],

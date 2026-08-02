@@ -57,7 +57,7 @@ describe("configuration", () => {
     expect(config.text.memoryMaxTokens).toBe(8_192);
     expect(config.text.reasoningEffort).toBe("none");
     expect(config.embedding).toBeUndefined();
-    expect(config.discordGuildId).toBe("1515356172092178512");
+    expect(config.guildIds).toContain("1515356172092178512");
     expect(config.ownerUserIds).toEqual([]);
     expect(config.cloudflare.voiceFallback).toBeTrue();
     expect(config.cloudflare.voiceModel).toBe("@cf/deepgram/aura-2-en");
@@ -167,13 +167,12 @@ describe("configuration", () => {
     ).toThrow("must be comma-separated Discord user IDs");
   });
 
-  test("rejects a Discord guild outside the deployment allowlist", () => {
-    expect(() =>
-      loadConfig({
-        ...requiredEnvironment,
-        DISCORD_GUILD_ID: "111111111111111111",
-      }),
-    ).toThrow();
+  test("parses multiple comma-separated guild IDs", () => {
+    const config = loadConfig({
+      ...requiredEnvironment,
+      DISCORD_GUILD_ID: "1515356172092178512,1533525641931259986",
+    });
+    expect(config.guildIds).toEqual(["1515356172092178512", "1533525641931259986"]);
   });
 
   test("rejects cleartext non-local provider endpoints", () => {

@@ -14,6 +14,7 @@ describe("slash commands", () => {
       "about",
       "music",
       "server",
+      "whitelist",
     ]);
     expect(new Set(names).size).toBe(names.length);
   });
