@@ -34,8 +34,8 @@ const migrations = [
     path: new URL("./migrations/008_memory_worker_recovery.sql", import.meta.url),
   },
   {
-    version: "009_vps_data",
-    path: new URL("./migrations/009_vps_data.sql", import.meta.url),
+    version: "009_data_imported",
+    path: new URL("./migrations/009_data_imported.sql", import.meta.url),
   },
 ] as const;
 
