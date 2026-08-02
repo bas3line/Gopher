@@ -176,6 +176,12 @@ export function prepareSpeechText(
     .replace(/^#{1,6}\s+/gm, "")
     .replace(/^\s*[-+*]\s+/gm, "")
     .replace(/[*_~>|]/g, " ")
+    .replace(/\[source\s*\d+\]/gi, "")
+    .replace(/\[ref\s*\d+\]/gi, "")
+    .replace(/\(source[^)]*\)/gi, "")
+    .replace(/\(see [^)]+\)/gi, "")
+    .replace(/\bsource:\s*\S+/gi, "")
+    .replace(/\bref:\s*\S+/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 

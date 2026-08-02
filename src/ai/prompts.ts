@@ -259,10 +259,11 @@ export function buildAnswerMessages(input: AnswerPromptInput): ChatMessage[] {
       ? [{
           role: "system" as const,
           content:
-            "VOICE REPLY — answer will be spoken aloud. Keep it short and natural.\n" +
-            "- 1-3 sentences, like you're talking in a voice call.\n" +
-            "- No markdown, code, lists, links, or formatting of any kind.\n" +
-            "- Just the answer — skip introductions, greetings, and sign-offs.",
+            "VOICE REPLY — this will be spoken aloud as audio.\n" +
+            "- 1-3 short sentences. Natural spoken English, like you're talking.\n" +
+            "- No markdown, code, lists, links, citations, or formatting.\n" +
+            "- No source numbers, no references, no footnotes at the end.\n" +
+            "- Just say the answer directly. Skip greetings and sign-offs.",
         }]
       : []),
     ...buildImageResponseContext(
