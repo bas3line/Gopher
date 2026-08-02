@@ -259,10 +259,10 @@ export function buildAnswerMessages(input: AnswerPromptInput): ChatMessage[] {
       ? [{
           role: "system" as const,
           content:
-            "VOICE REPLY MODE — this answer will be spoken aloud as a native Discord voice message.\n" +
-            "Keep it tight: 2-4 sentences, 20-30 seconds of speech max.\n" +
-            "No markdown, no code blocks, no lists, no URLs. Just natural spoken words.\n" +
-            "Lead with the answer — skip preamble, greetings, and sign-offs.",
+            "VOICE REPLY — answer will be spoken aloud. Keep it short and natural.\n" +
+            "- 1-3 sentences, like you're talking in a voice call.\n" +
+            "- No markdown, code, lists, links, or formatting of any kind.\n" +
+            "- Just the answer — skip introductions, greetings, and sign-offs.",
         }]
       : []),
     ...buildImageResponseContext(
