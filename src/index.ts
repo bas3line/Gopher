@@ -16,6 +16,7 @@ import { CloudflareAuraVoice } from "./voice/cloudflare-aura.ts";
 import { CloudflareWhisper } from "./voice/cloudflare-whisper.ts";
 import { FallbackVoice } from "./voice/fallback.ts";
 import { FishAudioVoice } from "./voice/fish-audio.ts";
+import { OpenRouterFishVoice } from "./voice/openrouter-fish.ts";
 import { WebResearch } from "./web/firecrawl.ts";
 
 const config = loadConfig();
@@ -86,6 +87,10 @@ const fishVoice = new FishAudioVoice({
   ...config.fishAudio,
   logger,
 });
+const openRouterVoice = new OpenRouterFishVoice({
+  ...config.openRouterFishAudio,
+  logger,
+});
 const cloudflareVoice = new CloudflareAuraVoice({
   accountId: config.cloudflare.accountId,
   apiToken: config.cloudflare.apiToken,
@@ -113,9 +118,9 @@ const voiceChatVoice = new CloudflareAuraVoice({
   logger,
 });
 const voice = new FallbackVoice({
-  primary: fishVoice,
+  primary: openRouterVoice,
   fallback: cloudflareVoice,
-  primaryName: "Fish Audio",
+  primaryName: "OpenRouter Fish Audio (free)",
   fallbackName: "Cloudflare Aura-2 Amalthea",
   logger,
 });

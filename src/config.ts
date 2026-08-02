@@ -132,6 +132,11 @@ const configSchema = z
       .min(100)
       .max(5_000)
       .default(1_800),
+    OPENROUTER_API_KEY: optionalTrimmed,
+    OPENROUTER_FISH_AUDIO_MODEL: z
+      .string()
+      .regex(/^[a-z0-9._-]+\/[a-z0-9._-]+(:free)?$/i)
+      .default("fish-audio/s2.1-pro-free:free"),
     MUSIC_ENABLED: z
       .enum(["true", "false"])
       .default("false")
@@ -346,6 +351,12 @@ export interface AppConfig {
     model: string;
     maxCharacters: number;
   };
+  openRouterFishAudio: {
+    apiKey?: string;
+    referenceId: string;
+    model: string;
+    maxCharacters: number;
+  };
   music: {
     enabled: boolean;
     lavalinkUrl: string;
@@ -451,6 +462,12 @@ export function loadConfig(
       ...(value.FISH_AUDIO_API_KEY ? { apiKey: value.FISH_AUDIO_API_KEY } : {}),
       referenceId: value.FISH_AUDIO_REFERENCE_ID,
       model: value.FISH_AUDIO_MODEL,
+      maxCharacters: value.FISH_AUDIO_MAX_CHARACTERS,
+    },
+    openRouterFishAudio: {
+      ...(value.OPENROUTER_API_KEY ? { apiKey: value.OPENROUTER_API_KEY } : {}),
+      referenceId: value.FISH_AUDIO_REFERENCE_ID,
+      model: value.OPENROUTER_FISH_AUDIO_MODEL,
       maxCharacters: value.FISH_AUDIO_MAX_CHARACTERS,
     },
     music: {
