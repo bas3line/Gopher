@@ -101,10 +101,8 @@ export class OpenRouterFishVoice implements VoiceSynthesizer {
         body: JSON.stringify({
           model: this.options.model,
           input: text,
-          voice: this.options.referenceId,
-          response_format: "opus",
-          // Fish Audio provider-specific parameters passed through
           reference_id: this.options.referenceId,
+          format: "opus",
           sample_rate: 48_000,
           opus_bitrate: 32_000,
           latency: "balanced",
