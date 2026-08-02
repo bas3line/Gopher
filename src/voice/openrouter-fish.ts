@@ -11,6 +11,12 @@ import {
 const defaultApiBase = "https://openrouter.ai/api/v1";
 const defaultMaxAudioBytes = 8 * 1024 * 1024;
 
+/** OpenRouter returns raw 16-bit signed PCM at 44100 Hz mono regardless
+ *  of the requested format. */
+const openRouterPcmSampleRate = 44_100;
+const openRouterPcmChannels = 1;
+const openRouterPcmBytesPerSample = 2;
+
 type FetchLike = (
   input: string | URL | Request,
   init?: RequestInit,
@@ -20,8 +26,8 @@ type FetchLike = (
  * OpenRouter-proxied Fish Audio voice synthesis using the free
  * fish-audio/s2.1-pro-free:free model.
  *
- * Request/response format mirrors Fish Audio's native TTS API, routed
- * through OpenRouter's OpenAI-compatible gateway.
+ * OpenRouter always returns raw 16-bit signed PCM at 44100 Hz mono.
+ * We wrap it in a WAV container so Discord can play it directly.
  */
 export class OpenRouterFishVoice implements VoiceSynthesizer {
   constructor(
@@ -60,12 +66,17 @@ export class OpenRouterFishVoice implements VoiceSynthesizer {
     let lastError: unknown;
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       try {
-        const audio = await this.request(prepared.text);
-        const durationSeconds = readOggOpusDurationSeconds(audio);
+        const pcm = await this.requestPcm(prepared.text);
+        const audio = pcmToWav44100Mono(pcm);
+        const durationSeconds =
+          pcm.length /
+          (openRouterPcmSampleRate *
+            openRouterPcmChannels *
+            openRouterPcmBytesPerSample);
         return {
           audio,
-          durationSeconds,
-          waveform: createDiscordWaveform(audio, durationSeconds),
+          durationSeconds: Math.round(durationSeconds * 1_000) / 1_000,
+          waveform: createDiscordWaveform(pcm, durationSeconds),
           needsTextFollowUp: prepared.needsTextFollowUp,
         };
       } catch (error) {
@@ -80,7 +91,7 @@ export class OpenRouterFishVoice implements VoiceSynthesizer {
     throw lastError;
   }
 
-  private async request(text: string): Promise<Buffer> {
+  private async requestPcm(text: string): Promise<Buffer> {
     const baseUrl = (this.options.apiBaseUrl ?? defaultApiBase).replace(
       /\/+$/,
       "",
@@ -94,7 +105,7 @@ export class OpenRouterFishVoice implements VoiceSynthesizer {
         headers: {
           authorization: `Bearer ${this.options.apiKey}`,
           "content-type": "application/json",
-          accept: "audio/ogg, application/octet-stream",
+          accept: "audio/pcm, audio/ogg, application/octet-stream, */*",
           "HTTP-Referer": "https://github.com/bas3line/Gopher",
           "X-Title": "Gopher Discord Bot",
         },
@@ -140,24 +151,76 @@ export class OpenRouterFishVoice implements VoiceSynthesizer {
       );
     }
 
-    const audio = await readBoundedAudio(
+    const raw = await readBoundedResponse(
       response,
       this.options.maxAudioBytes ?? defaultMaxAudioBytes,
     );
+
+    // OpenRouter always returns raw PCM regardless of requested format.
+    // If it happens to be Ogg Opus, use it directly via the parent validator.
     if (
-      audio.length < 32 ||
-      audio.subarray(0, 4).toString("ascii") !== "OggS"
+      raw.length >= 4 &&
+      raw.subarray(0, 4).toString("ascii") === "OggS"
     ) {
+      return raw;
+    }
+
+    // Must be raw PCM — validate minimum size (at least a few samples).
+    if (raw.length < 64 || raw.length % 2 !== 0) {
       throw new VoiceSynthesisError(
-        "OpenRouter Fish Audio returned invalid Ogg Opus audio",
+        "OpenRouter Fish Audio returned unrecognized audio data",
         false,
       );
     }
-    return audio;
+
+    return raw;
   }
 }
 
-async function readBoundedAudio(
+/** Wraps 44100 Hz mono signed-16-bit PCM in a RIFF WAV container. */
+function pcmToWav44100Mono(pcm: Buffer): Buffer {
+  if (pcm.length === 0) {
+    throw new VoiceSynthesisError("PCM audio must not be empty", false);
+  }
+  if (pcm.length % openRouterPcmBytesPerSample !== 0) {
+    throw new VoiceSynthesisError(
+      "PCM audio must contain complete samples",
+      false,
+    );
+  }
+  if (pcm.length > 0xffff_ffff - 44) {
+    throw new VoiceSynthesisError(
+      "PCM audio is too large for a WAV container",
+      false,
+    );
+  }
+
+  const byteRate =
+    openRouterPcmSampleRate *
+    openRouterPcmChannels *
+    openRouterPcmBytesPerSample;
+  const blockAlign =
+    openRouterPcmChannels * openRouterPcmBytesPerSample;
+
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16); // PCM
+  header.writeUInt16LE(1, 20); // format = PCM
+  header.writeUInt16LE(openRouterPcmChannels, 22);
+  header.writeUInt32LE(openRouterPcmSampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(16, 34); // bits per sample
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(pcm.length, 40);
+
+  return Buffer.concat([header, pcm], header.length + pcm.length);
+}
+
+async function readBoundedResponse(
   response: Response,
   maxBytes: number,
 ): Promise<Buffer> {
