@@ -43,7 +43,7 @@ function parseWebhookUrls(raw?: string) {
 const webhookUrls = parseWebhookUrls(process.env.WEBHOOK_URLS);
 const extraStreams: Array<{ write: (s: string) => void }> = [];
 if (webhookUrls.length > 0) {
-  extraStreams.push(createDiscordLogStream(webhookUrls, null!));
+  extraStreams.push(createDiscordLogStream(webhookUrls));
 }
 
 const logger = createLogger(config, extraStreams as unknown as Array<import("node:stream").Writable>);
