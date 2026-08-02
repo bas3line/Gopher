@@ -74,6 +74,7 @@ export interface AnswerPromptInput {
   runtimeCapabilities?: RuntimeCapabilities;
   durableMemories?: DurableMemory[];
   pendingCommitments?: DurableMemory[];
+  forceVoice?: boolean;
   agentRuntime?: {
     enabled: boolean;
     currentDate: string;
@@ -254,6 +255,16 @@ export function buildAnswerMessages(input: AnswerPromptInput): ChatMessage[] {
 
   const messages: ChatMessage[] = [
     { role: "system", content: persona },
+    ...(input.forceVoice
+      ? [{
+          role: "system" as const,
+          content:
+            "VOICE REPLY MODE — this answer will be spoken aloud as a native Discord voice message.\n" +
+            "Keep it tight: 2-4 sentences, 20-30 seconds of speech max.\n" +
+            "No markdown, no code blocks, no lists, no URLs. Just natural spoken words.\n" +
+            "Lead with the answer — skip preamble, greetings, and sign-offs.",
+        }]
+      : []),
     ...buildImageResponseContext(
       input.imageUrls?.length ?? 0,
       input.uncaptionedImage ?? false,

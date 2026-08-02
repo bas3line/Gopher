@@ -1258,6 +1258,7 @@ export class DiscordBot {
                 : {}),
               serverEmojis,
               isOwner: input.isOwner,
+              forceVoice: input.forceVoice,
               ...(useVision ? { imageUrls: input.imageUrls } : {}),
               ...(useVision && input.uncaptionedImage
                 ? { uncaptionedImage: true }
