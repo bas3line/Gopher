@@ -23,8 +23,8 @@ type FetchLike = (
 ) => Promise<Response>;
 
 /**
- * OpenRouter-proxied Fish Audio voice synthesis using the free
- * fish-audio/s2.1-pro-free:free model.
+ * OpenRouter-proxied Fish Audio voice synthesis using the
+ * fish-audio/s2.1-pro model.
  *
  * OpenRouter always returns raw 16-bit signed PCM at 44100 Hz mono.
  * We wrap it in a WAV container so Discord can play it directly.

@@ -139,7 +139,7 @@ const configSchema = z
     OPENROUTER_FISH_AUDIO_MODEL: z
       .string()
       .regex(/^[a-z0-9._-]+\/[a-z0-9._-]+(:free)?$/i)
-      .default("fish-audio/s2.1-pro-free:free"),
+      .default("fish-audio/s2.1-pro"),
     MUSIC_ENABLED: z
       .enum(["true", "false"])
       .default("false")
