@@ -139,11 +139,11 @@ const configSchema = z
     OPENROUTER_FISH_AUDIO_MODEL: z
       .string()
       .regex(/^[a-z0-9._-]+\/[a-z0-9._-]+(:free)?$/i)
-      .default("hexgrad/kokoro-82m"),
+      .default("minimax/speech-2.8-hd"),
     OPENROUTER_VOICE: z
       .string()
       .min(1)
-      .default("af_heart"),
+      .default("female-shaonv"),
     MUSIC_ENABLED: z
       .enum(["true", "false"])
       .default("false")

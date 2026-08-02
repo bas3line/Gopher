@@ -67,8 +67,21 @@ export class OpenRouterFishVoice implements VoiceSynthesizer {
     let lastError: unknown;
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       try {
-        const { pcm, sampleRate } = await this.requestPcm(prepared.text);
-        const channels = 1; // OpenRouter TTS is mono
+        const { pcm, sampleRate, format } = await this.requestPcm(prepared.text);
+
+        // MP3 from providers like MiniMax — send as-is, Discord handles it.
+        if (format === "mp3") {
+          const durationSeconds = estimateMp3Duration(pcm);
+          return {
+            audio: pcm,
+            durationSeconds,
+            waveform: createDiscordWaveform(pcm, durationSeconds),
+            needsTextFollowUp: prepared.needsTextFollowUp,
+          };
+        }
+
+        // PCM — wrap in WAV container for Discord.
+        const channels = 1;
         const audio = pcmToWav(pcm, sampleRate, channels);
         const byteRate = sampleRate * channels * pcmBytesPerSample;
         const durationSeconds = pcm.length / byteRate;
@@ -90,7 +103,7 @@ export class OpenRouterFishVoice implements VoiceSynthesizer {
     throw lastError;
   }
 
-  private async requestPcm(text: string): Promise<{ pcm: Buffer; sampleRate: number }> {
+  private async requestPcm(text: string): Promise<{ pcm: Buffer; sampleRate: number; format: "pcm" | "mp3" | "opus" }> {
     const baseUrl = (this.options.apiBaseUrl ?? defaultApiBase).replace(
       /\/+$/,
       "",
@@ -151,20 +164,29 @@ export class OpenRouterFishVoice implements VoiceSynthesizer {
       this.options.maxAudioBytes ?? defaultMaxAudioBytes,
     );
 
-    // OpenRouter always returns raw PCM regardless of requested format.
-    // Parse sample rate from Content-Type header (e.g. "audio/pcm;rate=24000;channels=1").
+    // Check the response content-type for the actual audio format.
     const contentType = response.headers.get("content-type") ?? "";
+    const isMp3 = contentType.includes("mpeg") || contentType.includes("mp3");
+    const isOgg = raw.length >= 4 && raw.subarray(0, 4).toString("ascii") === "OggS";
+
+    if (isMp3) {
+      if (raw.length < 64) {
+        throw new VoiceSynthesisError(
+          "OpenRouter voice returned empty MP3 audio",
+          false,
+        );
+      }
+      return { pcm: raw, sampleRate: 24_000, format: "mp3" as const };
+    }
+
+    if (isOgg) {
+      return { pcm: raw, sampleRate: 48_000, format: "opus" as const };
+    }
+
+    // Must be PCM — parse sample rate from Content-Type.
     const rateMatch = contentType.match(/rate=(\d+)/);
     const sampleRate = rateMatch ? Number(rateMatch[1]) : defaultPcmSampleRate;
 
-    if (
-      raw.length >= 4 &&
-      raw.subarray(0, 4).toString("ascii") === "OggS"
-    ) {
-      return { pcm: raw, sampleRate: 48_000 };
-    }
-
-    // Must be raw PCM — validate minimum size (at least a few samples).
     if (raw.length < 64 || raw.length % 2 !== 0) {
       throw new VoiceSynthesisError(
         "OpenRouter voice returned unrecognized audio data",
@@ -172,7 +194,7 @@ export class OpenRouterFishVoice implements VoiceSynthesizer {
       );
     }
 
-    return { pcm: raw, sampleRate };
+    return { pcm: raw, sampleRate, format: "pcm" as const };
   }
 }
 
@@ -253,4 +275,9 @@ async function readBoundedResponse(
     chunks.map((chunk) => Buffer.from(chunk)),
     total,
   );
+}
+
+/** Rough MP3 duration estimate from file size (assumes ~128kbps). */
+function estimateMp3Duration(mp3: Buffer): number {
+  return Math.round((mp3.length / 16_000) * 100) / 100;
 }

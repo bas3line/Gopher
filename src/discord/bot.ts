@@ -1838,8 +1838,13 @@ export class DiscordBot {
   }
 
   private voiceAttachment(voice: SynthesizedVoiceMessage): AttachmentBuilder {
-    return new AttachmentBuilder(voice.audio, {
-      name: "gopher-voice.ogg",
+    const audio = voice.audio;
+    const isMp3 =
+      audio.length >= 2 &&
+      audio[0] === 0xff &&
+      (audio[1]! & 0xe0) === 0xe0;
+    return new AttachmentBuilder(audio, {
+      name: isMp3 ? "gopher-voice.mp3" : "gopher-voice.ogg",
       description: "Gopher voice reply",
       duration: voice.durationSeconds,
       waveform: voice.waveform,
