@@ -139,11 +139,11 @@ const configSchema = z
     OPENROUTER_FISH_AUDIO_MODEL: z
       .string()
       .regex(/^[a-z0-9._-]+\/[a-z0-9._-]+(:free)?$/i)
-      .default("minimax/speech-2.8-hd"),
+      .default("google/gemini-3.1-flash-tts-preview"),
     OPENROUTER_VOICE: z
       .string()
       .min(1)
-      .default("female-shaonv"),
+      .default("Kore"),
     MUSIC_ENABLED: z
       .enum(["true", "false"])
       .default("false")

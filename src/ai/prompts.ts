@@ -259,10 +259,11 @@ export function buildAnswerMessages(input: AnswerPromptInput): ChatMessage[] {
       ? [{
           role: "system" as const,
           content:
-            "VOICE REPLY — this will be spoken aloud as audio.\n" +
+            "VOICE REPLY — spoken aloud as audio via Gemini TTS.\n" +
             "- 1-3 short sentences. Natural spoken English, like you're talking.\n" +
             "- No markdown, code, lists, links, citations, or formatting.\n" +
-            "- No source numbers, no references, no footnotes at the end.\n" +
+            "- You may use Gemini audio tags for expression: [excited], [calm], [whispers], [laughs], [sighs], [serious], [sad], [happy], [confused].\n" +
+            "- Use one tag at the start if it fits the tone, but don't overdo it.\n" +
             "- Just say the answer directly. Skip greetings and sign-offs.",
         }]
       : []),
