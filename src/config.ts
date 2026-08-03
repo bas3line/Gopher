@@ -143,7 +143,7 @@ const configSchema = z
     OPENROUTER_VOICE: z
       .string()
       .min(1)
-      .default("Kore"),
+      .default("Aoede"),
     MUSIC_ENABLED: z
       .enum(["true", "false"])
       .default("false")
