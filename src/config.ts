@@ -134,7 +134,7 @@ const configSchema = z
       .int()
       .min(100)
       .max(5_000)
-      .default(450),
+      .default(600),
     OPENROUTER_API_KEY: optionalTrimmed,
     OPENROUTER_FISH_AUDIO_MODEL: z
       .string()

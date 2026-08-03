@@ -148,10 +148,10 @@ const voiceChatVoice = new CloudflareAuraVoice({
   logger,
 });
 const voice = new FallbackVoice({
-  primary: cloudflareVoice,
-  fallback: openRouterVoice,
-  primaryName: "Cloudflare Aura-2 Amalthea",
-  fallbackName: "OpenRouter Fish Audio",
+  primary: openRouterVoice,
+  fallback: cloudflareVoice,
+  primaryName: "OpenRouter Gemini TTS (Kore)",
+  fallbackName: "Cloudflare Aura-2 Amalthea",
   logger,
 });
 const memoryWorker = new MemoryWorker({
