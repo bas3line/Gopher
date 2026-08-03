@@ -74,7 +74,7 @@ describe("configuration", () => {
       "ca3007f96ae7499ab87d27ea3599956a",
     );
     expect(config.fishAudio.model).toBe("s2-pro");
-    expect(config.fishAudio.maxCharacters).toBe(450);
+    expect(config.fishAudio.maxCharacters).toBe(600);
     expect(config.fishAudio.apiKey).toBeUndefined();
     expect(config.music).toEqual({
       enabled: false,
