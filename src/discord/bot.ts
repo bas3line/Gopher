@@ -710,6 +710,7 @@ export class DiscordBot {
   }
 
   private async handleInteraction(interaction: Interaction): Promise<void> {
+    this.dependencies.logger.info({ command: interaction.isChatInputCommand() ? interaction.commandName : 'other', guildId: interaction.guildId }, "interaction received");
     if (interaction.isButton()) {
       await this.moderation.handleButton(interaction);
       return;
